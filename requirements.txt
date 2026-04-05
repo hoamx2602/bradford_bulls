@@ -10,7 +10,7 @@ ultralytics>=8.3.0        # YOLOv8
 
 # Feature Matching (Phase 2+)
 # open-clip-torch>=2.24.0
-# transformers>=4.40.0
+transformers<4.40.0
 
 # Frame Similarity
 imagehash>=4.3.1           # perceptual hashing
@@ -23,6 +23,12 @@ tqdm>=4.66.0
 
 # Annotation
 roboflow>=1.1.0
+autodistill>=0.1.0
+autodistill-grounding-dino>=0.1.0
+supervision>=0.18.0
+
+# Machine Learning
+scikit-learn>=1.4.0
 
 # Jupyter
 jupyter>=1.0.0
