@@ -66,7 +66,7 @@ Từ tập frames đã lưu, lọc ra các frames mà **cầu thủ hiện rõ r
 
 ---
 
-## PHASE 1.5: ANNOTATION WORKFLOW (Roboflow + Jupyter Notebook)
+### 1.5: ANNOTATION WORKFLOW (Roboflow + Jupyter Notebook)
 
 ### 1.5.1 Annotation Pipeline
 
@@ -131,7 +131,7 @@ dataset = project.version(1).download("yolov8")
 
 ---
 
-## PHASE 1.6: GPU COMPATIBILITY & ENVIRONMENT
+### 1.6: GPU COMPATIBILITY & ENVIRONMENT
 
 ### Chiến lược chạy đa nền tảng
 

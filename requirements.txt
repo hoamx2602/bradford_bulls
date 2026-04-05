@@ -1,0 +1,30 @@
+# Video Processing
+yt-dlp>=2024.12.0
+opencv-python>=4.9.0
+Pillow>=10.0.0
+
+# AI/ML Models
+torch>=2.2.0
+torchvision>=0.17.0
+ultralytics>=8.3.0        # YOLOv8
+
+# Feature Matching (Phase 2+)
+# open-clip-torch>=2.24.0
+# transformers>=4.40.0
+
+# Frame Similarity
+imagehash>=4.3.1           # perceptual hashing
+scikit-image>=0.22.0       # SSIM
+
+# Data & Utilities
+numpy>=1.26.0
+pandas>=2.2.0
+tqdm>=4.66.0
+
+# Annotation
+roboflow>=1.1.0
+
+# Jupyter
+jupyter>=1.0.0
+ipywidgets>=8.1.0
+matplotlib>=3.8.0

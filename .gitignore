@@ -20,3 +20,4 @@ Thumbs.db
 *.gz
 *.tar
 PLAN.md
+output/
