@@ -74,8 +74,15 @@ MIN_VISIBILITY = 0.70
 # VIDEO DOWNLOAD CONFIG
 # ============================================================
 
-# yt-dlp preferred quality
-YT_DLP_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+# yt-dlp: prefer merged video+audio up to 1080p.
+# Do not force video ext=mp4 only — on YouTube the best MP4 is often 720p while 1080p is VP9/WebM.
+# See README.md to raise the cap (e.g. 4K) or pin a different format string.
+YT_DLP_FORMAT = (
+    "bestvideo[height<=1080]+bestaudio/"
+    "bestvideo+bestaudio/"
+    "best[height<=1080]/"
+    "best"
+)
 
 # ============================================================
 # SPONSOR LABELS (from Kit Sponsors directory)

@@ -21,3 +21,4 @@ Thumbs.db
 *.tar
 PLAN.md
 output/
+src/__pycache__/
