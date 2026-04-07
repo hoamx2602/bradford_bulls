@@ -22,3 +22,4 @@ Thumbs.db
 PLAN.md
 output/
 src/__pycache__/
+logs/

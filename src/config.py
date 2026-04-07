@@ -89,19 +89,27 @@ YT_DLP_FORMAT = (
 # ============================================================
 
 SPONSOR_LABELS = {
-    "aon": "AON",
-    "atm_hospitality": "ATM Hospitality",
-    "cch_cedar_court": "Cedar Court Hotels",
-    "chadlaw": "ChadLaw",
-    "em_workwear": "EM Workwear",
-    "fairway_flooring": "Fairway Flooring",
-    "klg": "KLG",
-    "mcp": "MCP",
-    "mna_cladding": "MNA Cladding",
-    "mna_support": "MNA Support Services",
-    "bartercard": "Bartercard",
-    "top_notch": "Top Notch",
-    "romantica_beds": "Romantica Beds",
+    "aon_red": "Aon (Red)",              # 0
+    "aon_white": "Aon (White)",           # 1
+    "atm_hospitality": "ATM Hospitality", # 2
+    "cch_black": "CCH (Black)",           # 3
+    "cch_white": "CCH (White)",           # 4
+    "chadlaw": "ChadLaw",                 # 5
+    "em_workwear": "EM Workwear",         # 6
+    "fairway_flooring": "Fairway Flooring",  # 7
+    "klg": "KLG",                         # 8
+    "mcp_away": "MCP (Away)",             # 9
+    "mcp_home": "MCP (Home)",             # 10
+    "mna_cladding": "MNA Cladding",       # 11
+    "mna_support": "MNA Support",         # 12
+    "paints_lacquers_yellow": "Paints & Lacquers (yellow)",  # 13
+    "top_notch": "Top Notch",             # 14
+    "bartercard": "Bartercard",           # 15
+    "floor_tonic": "Floor Tonic",         # 16
+    "paints_lacquers_red": "Paints & Lacquers",  # 17
+    "romantica_white": "Romantica (White)",  # 18
+    "romantica_black": "Romantica (Black)",  # 19
+    "acs_group": "ACS Group",             # 20
 }
 
 # Mapping: sponsor → jersey position (from pricing CSV)
