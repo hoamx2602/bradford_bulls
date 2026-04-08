@@ -170,14 +170,30 @@ def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
 
     print(f"  → Selected K={best_k} (silhouette={best_score:.3f})")
 
+    # Print cluster summary as text (visible without scrolling)
+    cluster_sizes = {c: int((best_labels == c).sum()) for c in range(best_k)}
+    print(f"\n{'='*50}")
+    print(f"  CLUSTERS FOUND:")
+    for c in range(best_k):
+        print(f"    Cluster {c}: {cluster_sizes[c]} player crops")
+    print(f"{'='*50}")
+    print(f"  ↓↓↓ SEE JERSEY SAMPLES BELOW ↓↓↓")
+    print(f"  ↓↓↓ THEN SCROLL DOWN TO ENTER YOUR CHOICE ↓↓↓")
+    print(f"{'='*50}\n")
+
     # Visualize clusters
     _show_calibration_grid(all_crops, best_labels, best_k)
+
+    # Prominent message after grid
+    print(f"\n{'🔻'*25}")
+    print(f"  👇 ENTER YOUR TEAM'S CLUSTER NUMBER BELOW 👇")
+    print(f"{'🔻'*25}\n")
 
     # User selects target team
     while True:
         try:
             target = int(input(
-                f"\n→ Enter cluster number for YOUR TEAM (0-{best_k - 1}): "
+                f"→ Which cluster is YOUR TEAM? Enter number (0-{best_k - 1}): "
             ))
             if 0 <= target < best_k:
                 break
