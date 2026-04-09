@@ -15,21 +15,67 @@ from .calibration import extract_torso_crop, classify_person
 
 
 # ── Default parameters ────────────────────────────────────────────────
+# Each param has a comment explaining:
+#   What it controls → Effect of ↑ (raise) / ↓ (lower)
 DEFAULT_PARAMS = {
-    "PERSON_CONFIDENCE": 0.5,
+    # YOLO confidence threshold for person detection.
+    # ↑ = fewer detections, only high-confidence → misses distant players
+    # ↓ = more detections, includes uncertain → more false positives
+    "PERSON_CONFIDENCE": 0.45,
+
+    # Minimum number of persons in frame to keep it.
+    # ↑ = only group shots → fewer frames
+    # ↓ = accepts solo shots → more frames
     "MIN_PERSONS": 1,
-    "MIN_MAX_PERSON_AREA_RATIO": 0.03,
-    "MIN_SHARPNESS": 0.25,
-    "MOTION_BLUR_SHARPNESS_MIN": 0.12,
+
+    # Minimum (largest person bbox area / frame area) to consider frame.
+    # Controls how "zoomed in" the camera must be.
+    # ↑ = only extreme close-ups → fewer frames, higher logo detail
+    # ↓ = accepts wider shots → more frames, smaller players
+    "MIN_MAX_PERSON_AREA_RATIO": 0.015,
+
+    # Sharpness threshold (normalized 0-1). Frames below this are flagged
+    # as "motion blur" but still kept as candidates.
+    # ↑ = stricter quality → only razor-sharp frames
+    # ↓ = more tolerant → keeps slightly soft frames
+    "MIN_SHARPNESS": 0.15,
+
+    # Hard blur cutoff — frames below this are SKIPPED entirely.
+    # This is the main "junk filter" for motion blur.
+    # ↑ = removes more blurry frames → fewer candidates
+    # ↓ = keeps more blurry frames → more candidates but noisier
+    "MOTION_BLUR_SHARPNESS_MIN": 0.06,
+
+    # Whether to check for green pitch in frame.
+    # True = skip frames without visible grass (crowd shots, graphics)
+    # False = disable pitch check entirely → more frames
     "ENABLE_PITCH_GREEN_FILTER": True,
+
+    # Vertical position (0-1) to start looking for green pitch.
+    # 0.40 = check bottom 60% of frame for grass.
+    # ↑ = smaller ROI → less strict pitch check
+    # ↓ = larger ROI → stricter pitch check
     "PITCH_ROI_Y_START": 0.40,
-    "MIN_PITCH_GREEN_RATIO": 0.06,
+
+    # Minimum green ratio in pitch ROI to consider "on pitch".
+    # ↑ = requires more visible grass → skips close-ups with little grass
+    # ↓ = accepts less grass → keeps more close-ups (usually better for logos)
+    "MIN_PITCH_GREEN_RATIO": 0.04,
+
+    # Pass 1: check every Nth frame for zoom level.
+    # ↑ = faster scan but may miss short zoom-ins
+    # ↓ = slower scan but catches brief close-ups
     "SCAN_INTERVAL": 5,
+
+    # Minimum consecutive quality frames to form a "segment".
+    # ↑ = only sustained zoom-ins → fewer, longer segments
+    # ↓ = catches brief zoom-ins too → more segments
     "MIN_SEGMENT_FRAMES": 2,
+
+    # How many consecutive "bad" frames allowed before ending a segment.
+    # ↑ = merges nearby segments → longer segments
+    # ↓ = splits segments at any gap → more, shorter segments
     "SEGMENT_GAP_TOLERANCE": 3,
-    "FRAMES_PER_SHORT_SEGMENT": 2,
-    "FRAMES_PER_LONG_SEGMENT": 3,
-    "LONG_SEGMENT_THRESHOLD": 3.0,
 }
 
 
@@ -297,21 +343,9 @@ def pass2_extract(video_path, segments, yolo_model, device,
 
         stats["segments_processed"] += 1
 
-        # Pick top N from this segment
-        if seg_candidates:
-            seg_candidates.sort(key=lambda x: x["score"], reverse=True)
-            for pick_i in range(min(n_pick, len(seg_candidates))):
-                if pick_i == 0:
-                    candidates.append(seg_candidates[0])
-                else:
-                    # Ensure temporal diversity: >1s apart from previous picks
-                    prev_ts = [candidates[-j - 1]["timestamp_sec"]
-                               for j in range(pick_i)]
-                    for sc in seg_candidates[pick_i:]:
-                        if all(abs(sc["timestamp_sec"] - pt) >= 1.0
-                               for pt in prev_ts):
-                            candidates.append(sc)
-                            break
+        # Add ALL qualifying frames from this segment to candidate pool.
+        # Quota selection (downstream) will handle final count + diversity.
+        candidates.extend(seg_candidates)
 
     cap.release()
 

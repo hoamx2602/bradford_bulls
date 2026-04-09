@@ -24,14 +24,17 @@ def extract_torso_features(torso_crop):
     hsv = cv2.cvtColor(torso_crop, cv2.COLOR_BGR2HSV)
     hist = cv2.calcHist([hsv], [0, 1, 2], None,
                         [12, 5, 5], [0, 180, 0, 256, 0, 256])
-    hist = cv2.normalize(hist, hist).flatten()
+    hist = cv2.normalize(hist, hist).flatten().astype(np.float64)
     return hist
 
 
-def extract_torso_crop(frame, bbox, overlay_mask=None):
+def extract_torso_crop(frame, bbox, overlay_mask=None, strict=False):
     """
     Extract torso region from a person bounding box.
-    Includes quality checks to reject bad crops.
+    
+    Args:
+        strict: If True (calibration), reject blurry crops. 
+                If False (runtime), accept blurry crops for color matching.
     
     Returns: (torso_crop, status) where status is "ok" or error reason
     """
@@ -71,11 +74,12 @@ def extract_torso_crop(frame, bbox, overlay_mask=None):
     if skin_mask.mean() / 255 > 0.6:
         return None, "mostly_skin"
 
-    # Sharpness check: reject motion-blurred crops
-    gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
-    lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if lap_var < 100:  # Very blurry → don't use for calibration
-        return None, "too_blurry"
+    # Sharpness check: ONLY during calibration (strict mode)
+    if strict:
+        gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
+        lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        if lap_var < 100:
+            return None, "too_blurry"
 
     return torso, "ok"
 
@@ -125,7 +129,7 @@ def discover_clusters(video_path, yolo_model, device, overlay_mask=None,
             if area / frame_area < min_person_area_ratio:
                 continue
 
-            torso, status = extract_torso_crop(frame, bbox, overlay_mask)
+            torso, status = extract_torso_crop(frame, bbox, overlay_mask, strict=True)
             if status != "ok":
                 continue
 

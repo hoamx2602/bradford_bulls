@@ -24,7 +24,7 @@ DEFAULT_QUOTA = {
 }
 
 
-def select_by_quota(candidates, total_target, quota=None, min_time_gap=5.0,
+def select_by_quota(candidates, total_target, quota=None, min_time_gap=1.5,
                     dedup_hash_thresh=8):
     """
     Select frames using quota-based allocation.
