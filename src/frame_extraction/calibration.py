@@ -1,61 +1,51 @@
 """
-Auto-calibration for team color classification.
+Semi-supervised team color calibration.
 
-Uses K-Means clustering on torso color histograms to automatically
-discover team colors. Works with ANY jersey color — no hardcoded palettes.
+Instead of relying on unsupervised K-Means (which often produces impure clusters),
+this module uses a HUMAN-IN-THE-LOOP approach:
 
-Key improvements:
-- Green masking: removes grass/pitch pixels before computing histograms
-- Gaussian weighting: prioritizes center of torso (jersey, not edges)
-- Outlier rejection: removes misclassified samples after initial clustering
-- Close-up filtering: rejects extreme close-ups (coaches, staff)
+  1. Sample diverse torso crops from the video
+  2. Display a numbered grid for the user to inspect
+  3. User labels a few examples of their team (by number)
+  4. System learns the team color signature and classifies all future detections
+
+This is fundamentally more robust because:
+  - Human provides ground truth → no ambiguity
+  - Works for ANY jersey design (solid, striped, patterned)
+  - Only needs 3-5 labeled examples per team
 """
 
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import silhouette_score
+from sklearn.cluster import KMeans
 
 
-# ---------------------------------------------------------------------------
-# Torso feature extraction
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Feature extraction
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _build_green_mask(hsv_img):
-    """
-    Create a binary mask that is 1 for NON-green pixels and 0 for green (grass).
-    Green in HSV: H≈35-85, S>40, V>40.
-    """
-    lower_green = np.array([35, 40, 40], dtype=np.uint8)
-    upper_green = np.array([85, 255, 255], dtype=np.uint8)
-    green = cv2.inRange(hsv_img, lower_green, upper_green)
-    return (green == 0).astype(np.float32)  # 1 = not green
+    """Binary mask: 1 = non-green pixel, 0 = grass/green."""
+    green = cv2.inRange(hsv_img, (35, 40, 40), (85, 255, 255))
+    return (green == 0).astype(np.float32)
 
 
 def _build_gaussian_weights(h, w, sigma=0.4):
-    """
-    Create a 2D Gaussian weight map that emphasizes the center of the crop.
-    sigma controls how much the edges are suppressed (smaller = more focused).
-    """
+    """2D Gaussian centered on crop — emphasizes jersey center, suppresses edges."""
     y = np.linspace(-1, 1, h)
     x = np.linspace(-1, 1, w)
     yy, xx = np.meshgrid(y, x, indexing='ij')
-    weights = np.exp(-0.5 * (xx**2 + yy**2) / (sigma**2))
-    return weights.astype(np.float32)
+    return np.exp(-0.5 * (xx**2 + yy**2) / sigma**2).astype(np.float32)
 
 
 def extract_torso_features(torso_crop):
     """
-    Extract color histogram features from a torso crop.
+    Compute a 300-dim weighted HSV histogram for the torso crop.
     
-    Improvements over basic histogram:
-    1. Green masking: grass pixels are excluded from the histogram
-    2. Gaussian weighting: center pixels contribute more than edge pixels
-    3. Uses HSV for robust color separation under varying lighting
-    
-    Returns: 300-dim feature vector (12×5×5 HSV histogram), or None
+    Green pixels (grass) are masked out, and center pixels are weighted
+    higher than edges (Gaussian weighting).
     """
     if torso_crop is None or torso_crop.size < 200:
         return None
@@ -63,185 +53,130 @@ def extract_torso_features(torso_crop):
     hsv = cv2.cvtColor(torso_crop, cv2.COLOR_BGR2HSV)
     h, w = torso_crop.shape[:2]
 
-    # Build combined weight map: Gaussian center weight × green exclusion
-    gaussian_w = _build_gaussian_weights(h, w, sigma=0.4)
-    green_mask = _build_green_mask(hsv)
-    combined_weights = gaussian_w * green_mask
+    # Combined weight: center emphasis × green exclusion
+    weights = _build_gaussian_weights(h, w, 0.4) * _build_green_mask(hsv)
 
-    # Check: if too few valid pixels after masking, skip
-    if combined_weights.sum() < 50:
+    if weights.sum() < 50:
         return None
 
-    # Compute weighted histogram using numpy
     pixels = hsv.reshape(-1, 3).astype(np.float64)
-    weights_flat = combined_weights.flatten()
-
-    # Bin edges for H(0-180), S(0-256), V(0-256)
-    bins = [12, 5, 5]
-    ranges = [(0, 180), (0, 256), (0, 256)]
+    w_flat = weights.flatten()
 
     hist, _ = np.histogramdd(
-        pixels, bins=bins, range=ranges, weights=weights_flat
+        pixels, bins=[12, 5, 5],
+        range=[(0, 180), (0, 256), (0, 256)],
+        weights=w_flat
     )
-
     hist = hist.flatten()
     norm = np.linalg.norm(hist)
     if norm > 0:
         hist /= norm
-
     return hist.astype(np.float64)
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 # Torso crop extraction
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 
 def extract_torso_crop(frame, bbox, overlay_mask=None, strict=False):
     """
-    Extract torso region from a person bounding box.
-    
+    Extract the jersey region from a YOLO person bounding box.
+
+    Filters applied:
+      - Too small (bbox < 40×60 px)
+      - Close-up / staff (bbox > 20% of frame = likely coach/commentator)
+      - Bad aspect ratio (width > height = not a standing player)
+      - Overlay contaminated (scoreboard/graphics region)
+      - Mostly skin (shirtless or wrong crop)
+      - Mostly grass (misaligned crop)
+      - Too blurry (only in strict/calibration mode)
+
     Args:
-        strict: If True (calibration), reject blurry crops. 
-                If False (runtime), accept blurry crops for color matching.
-    
-    Returns: (torso_crop, status) where status is "ok" or error reason
+        strict: True during calibration (rejects blurry); False at runtime
+    Returns:
+        (torso_crop, status_string)
     """
-    h, w = frame.shape[:2]
+    fh, fw = frame.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in bbox]
     bw, bh = x2 - x1, y2 - y1
 
-    # Skip tiny detections
     if bw < 40 or bh < 60:
         return None, "too_small"
 
-    # ---- Close-up / non-player filter ----
-    # Coaches and staff in close-ups have large bboxes (>25% of frame area)
-    # Real on-pitch players are much smaller
-    frame_area = h * w
-    bbox_area = bw * bh
-    if bbox_area / frame_area > 0.25:
-        return None, "close_up_likely_staff"
+    # Close-up filter: large bbox = likely TV close-up of staff/coach
+    if (bw * bh) / (fh * fw) > 0.20:
+        return None, "close_up"
 
-    # Players on pitch typically have height > 1.5× width (standing)
-    # Close-up face shots or seated staff tend to be wider
-    aspect = bh / bw if bw > 0 else 0
-    if aspect < 1.0:
-        return None, "bad_aspect_ratio"
+    # Standing player check: height should be > width
+    if bh / max(bw, 1) < 1.0:
+        return None, "bad_aspect"
 
-    # Torso/Jersey ROI: 10-40% of person height = upper body (jersey area)
-    ty1 = y1 + int(bh * 0.10)
-    ty2 = y1 + int(bh * 0.40)
-    tx1 = x1 + int(bw * 0.10)
-    tx2 = x2 - int(bw * 0.10)
-
-    # Clamp to frame bounds
-    ty1, ty2 = max(0, ty1), min(h, ty2)
-    tx1, tx2 = max(0, tx1), min(w, tx2)
+    # Jersey ROI: 10-40% of person height
+    ty1 = max(0, y1 + int(bh * 0.10))
+    ty2 = min(fh, y1 + int(bh * 0.40))
+    tx1 = max(0, x1 + int(bw * 0.10))
+    tx2 = min(fw, x2 - int(bw * 0.10))
 
     if ty2 - ty1 < 15 or tx2 - tx1 < 15:
         return None, "crop_too_small"
 
     torso = frame[ty1:ty2, tx1:tx2]
 
-    # Check overlay contamination
+    # Overlay check
     if overlay_mask is not None:
-        mask_crop = overlay_mask[ty1:ty2, tx1:tx2]
-        if mask_crop.mean() < 0.5:  # >50% overlay
-            return None, "overlay_contaminated"
+        if overlay_mask[ty1:ty2, tx1:tx2].mean() < 0.5:
+            return None, "overlay"
 
-    # Skin check: reject if torso is mostly skin (shirtless/wrong crop)
     hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-    skin_mask = cv2.inRange(hsv, (0, 30, 60), (25, 180, 255))
-    if skin_mask.mean() / 255 > 0.6:
+
+    # Skin check
+    skin = cv2.inRange(hsv, (0, 30, 60), (25, 180, 255))
+    if skin.mean() / 255 > 0.6:
         return None, "mostly_skin"
 
-    # Green check: reject if torso is mostly grass (bad crop alignment)
-    green_mask = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
-    if green_mask.mean() / 255 > 0.5:
+    # Grass check
+    grass = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
+    if grass.mean() / 255 > 0.5:
         return None, "mostly_grass"
 
-    # Sharpness check: ONLY during calibration (strict mode)
+    # Sharpness (calibration only)
     if strict:
         gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
-        lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        if lap_var < 100:
-            return None, "too_blurry"
+        if cv2.Laplacian(gray, cv2.CV_64F).var() < 100:
+            return None, "blurry"
 
     return torso, "ok"
 
 
-# ---------------------------------------------------------------------------
-# Cluster discovery
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 1: Collect diverse samples
+# ═══════════════════════════════════════════════════════════════════════════
 
-def _remove_outliers(X_scaled, labels, n_clusters, max_std=2.0):
+def collect_samples(video_path, yolo_model, device, overlay_mask=None,
+                    n_sample_frames=80, n_display=24):
     """
-    Remove samples that are far from their cluster center (likely misclassified).
+    Collect torso crops from the video and select a diverse subset for labeling.
     
-    Args:
-        max_std: samples beyond this many standard deviations from their 
-                 cluster center are flagged as outliers
-    
-    Returns: boolean mask (True = keep, False = outlier)
-    """
-    keep = np.ones(len(labels), dtype=bool)
-
-    for c in range(n_clusters):
-        mask = labels == c
-        if mask.sum() < 3:
-            continue
-
-        cluster_points = X_scaled[mask]
-        center = cluster_points.mean(axis=0)
-        dists = np.linalg.norm(cluster_points - center, axis=1)
-
-        threshold = dists.mean() + max_std * dists.std()
-        cluster_outliers = dists > threshold
-
-        # Map back to global indices
-        global_indices = np.where(mask)[0]
-        keep[global_indices[cluster_outliers]] = False
-
-    return keep
-
-
-def discover_clusters(video_path, yolo_model, device, overlay_mask=None,
-                      n_sample_frames=80, min_person_area_ratio=0.02):
-    """
-    Step 1 of calibration: Discover team color clusters.
-    
-    Samples frames, detects persons, clusters torso colors, shows grid.
-    Returns intermediate result — user then picks their team cluster
-    in the next notebook cell.
-    
-    Pipeline:
-    1. Sample N frames evenly across the video
-    2. Detect persons with YOLO
-    3. Extract torso crops (with close-up/staff filtering)
-    4. Compute weighted histograms (green-masked, Gaussian-weighted)
-    5. K-Means clustering
-    6. Outlier rejection — remove misclassified samples
-    7. Show clean grid for manual cluster selection
-    
-    Returns:
-        cluster_data dict (pass to finalize_calibration), or None on failure
+    Returns a dict containing:
+      - 'all_crops': list of all valid torso crops (64×64 BGR)
+      - 'all_features': list of feature vectors
+      - 'display_indices': indices of the diverse subset to show the user
+      - 'display_crops': the crops to display (ordered by diversity)
     """
     cap = cv2.VideoCapture(str(video_path))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_area = frame_w * frame_h
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_area = fw * fh
 
-    # Sample frames evenly (skip first/last 5%)
     start = int(total * 0.05)
     end = int(total * 0.95)
     indices = np.linspace(start, end, n_sample_frames, dtype=int)
 
-    all_crops = []
-    all_features = []
-    reject_reasons = {}
+    all_crops, all_features = [], []
+    reject_counts = {}
 
-    print(f"Calibration: sampling {n_sample_frames} frames...")
+    print(f"Sampling {n_sample_frames} frames for calibration...")
     for idx in indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
@@ -256,268 +191,274 @@ def discover_clusters(video_path, yolo_model, device, overlay_mask=None,
         for box in results[0].boxes:
             bbox = box.xyxy[0].cpu().numpy()
             area = float((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
-
-            if area / frame_area < min_person_area_ratio:
+            if area / frame_area < 0.02:
                 continue
 
             torso, status = extract_torso_crop(frame, bbox, overlay_mask, strict=True)
             if status != "ok":
-                reject_reasons[status] = reject_reasons.get(status, 0) + 1
+                reject_counts[status] = reject_counts.get(status, 0) + 1
                 continue
 
-            features = extract_torso_features(torso)
-            if features is None:
+            feat = extract_torso_features(torso)
+            if feat is None:
                 continue
 
             all_crops.append(cv2.resize(torso, (64, 64)))
-            all_features.append(features)
+            all_features.append(feat)
 
     cap.release()
+    n_total = len(all_crops)
+    print(f"Collected {n_total} valid torso crops.")
+    if reject_counts:
+        print(f"  Filtered out: {reject_counts}")
 
-    n_crops = len(all_crops)
-    print(f"Collected {n_crops} valid torso crops.")
-    if reject_reasons:
-        print(f"  Rejected: {reject_reasons}")
-
-    if n_crops < 10:
-        print("ERROR: Too few torso crops. Try lowering confidence.")
+    if n_total < 10:
+        print("ERROR: Too few crops. Try lowering YOLO confidence or min_person_area_ratio.")
         return None
 
-    # ---- K-Means clustering ----
+    # ── Select diverse subset for display ──
+    # Use mini K-Means to pick maximally diverse samples
     X = np.array(all_features)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    best_k, best_score, best_km, best_labels = 2, -1, None, None
-    for k in [2, 3]:
-        if n_crops < k * 3:
-            continue
-        km = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = km.fit_predict(X_scaled)
-        score = silhouette_score(X_scaled, labels)
-        print(f"  K={k}: silhouette={score:.3f}")
-        if score > best_score:
-            best_k, best_score, best_km, best_labels = k, score, km, labels
-
-    print(f"  → Selected K={best_k}")
-
-    # ---- Outlier rejection ----
-    keep_mask = _remove_outliers(X_scaled, best_labels, best_k, max_std=1.8)
-    n_removed = (~keep_mask).sum()
-    if n_removed > 0:
-        print(f"  → Removed {n_removed} outlier samples")
-
-        # Re-cluster without outliers for cleaner centroids
-        X_clean = X_scaled[keep_mask]
-        clean_crops = [c for c, k in zip(all_crops, keep_mask) if k]
-        km_clean = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-        clean_labels = km_clean.fit_predict(X_clean)
-
-        # Use cleaned data from here on
-        all_crops = clean_crops
-        all_features = [f for f, k in zip(all_features, keep_mask) if k]
-        best_labels = clean_labels
-        best_km = km_clean
-        X_scaled = X_clean
-        n_crops = len(all_crops)
-
-    # ---- Show grid ----
-    _show_calibration_grid(all_crops, best_labels, best_k)
-
-    # ---- Print summary ----
-    cluster_sizes = {c: int((best_labels == c).sum()) for c in range(best_k)}
-    print(f"\n{'='*55}")
-    for c in range(best_k):
-        # Compute dominant color description for each cluster
-        desc = _describe_cluster_color(all_crops, best_labels, c)
-        print(f"  Cluster {c}: {cluster_sizes[c]} crops — {desc}")
-    print(f"{'='*55}")
-    print(f"\n  ✏️  In the NEXT cell, set TARGET_CLUSTER to your")
-    print(f"      team's cluster number (0-{best_k - 1}), then run it.\n")
+    n_show = min(n_display, n_total)
+    if n_total <= n_display:
+        display_indices = list(range(n_total))
+    else:
+        # Pick diverse samples: run K-Means with K=n_display, 
+        # then pick the sample closest to each centroid
+        km = KMeans(n_clusters=n_show, random_state=42, n_init=5)
+        km.fit(X_scaled)
+        display_indices = []
+        for i in range(n_show):
+            cluster_members = np.where(km.labels_ == i)[0]
+            center = km.cluster_centers_[i]
+            dists = np.linalg.norm(X_scaled[cluster_members] - center, axis=1)
+            display_indices.append(int(cluster_members[dists.argmin()]))
 
     return {
-        "kmeans": best_km,
+        "all_crops": all_crops,
+        "all_features": all_features,
         "scaler": scaler,
-        "labels": best_labels,
-        "n_clusters": best_k,
-        "cluster_sizes": cluster_sizes,
-        "n_crops_total": n_crops,
+        "X_scaled": X_scaled,
+        "display_indices": display_indices,
+        "n_total": n_total,
     }
 
 
-def _describe_cluster_color(crops, labels, cluster_id):
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 2: Show numbered grid
+# ═══════════════════════════════════════════════════════════════════════════
+
+def show_samples(sample_data):
     """
-    Compute a human-readable color description for a cluster.
-    Analyzes average HSV values to describe the dominant jersey color.
+    Display a numbered grid of diverse torso crop samples.
+    The user will pick which numbers belong to their team.
     """
-    indices = np.where(labels == cluster_id)[0]
-    if len(indices) == 0:
-        return "empty"
+    if sample_data is None:
+        print("ERROR: No sample data. Run collect_samples() first.")
+        return
 
-    avg_h, avg_s, avg_v = [], [], []
-    for i in indices[:20]:  # Sample up to 20 crops
-        hsv = cv2.cvtColor(crops[i], cv2.COLOR_BGR2HSV)
-        # Mask out green pixels
-        green = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
-        non_green = (green == 0)
-        if non_green.sum() < 10:
-            continue
-        avg_h.append(hsv[non_green, 0].mean())
-        avg_s.append(hsv[non_green, 1].mean())
-        avg_v.append(hsv[non_green, 2].mean())
+    indices = sample_data["display_indices"]
+    crops = sample_data["all_crops"]
+    n = len(indices)
 
-    if not avg_h:
-        return "unknown"
+    # 4 columns layout
+    cols = min(6, n)
+    rows = (n + cols - 1) // cols
 
-    h, s, v = np.mean(avg_h), np.mean(avg_s), np.mean(avg_v)
+    fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3.5 * rows))
+    if rows == 1:
+        axes = axes[np.newaxis, :]
+    if cols == 1:
+        axes = axes[:, np.newaxis]
 
-    # Describe based on HSV
-    if s < 40:
-        if v > 170:
-            return f"LIGHT / WHITE (V={v:.0f}, S={s:.0f})"
-        elif v < 80:
-            return f"DARK / BLACK (V={v:.0f}, S={s:.0f})"
-        else:
-            return f"GRAY (V={v:.0f}, S={s:.0f})"
-    else:
-        # Chromatic — describe by hue
-        if h < 10 or h > 170:
-            color = "RED"
-        elif h < 25:
-            color = "ORANGE"
-        elif h < 35:
-            color = "YELLOW"
-        elif h < 85:
-            color = "GREEN"
-        elif h < 130:
-            color = "BLUE"
-        elif h < 155:
-            color = "PURPLE"
-        else:
-            color = "PINK"
-        return f"{color} (H={h:.0f}, S={s:.0f}, V={v:.0f})"
+    for i in range(rows * cols):
+        ax = axes[i // cols, i % cols]
+        if i < n:
+            idx = indices[i]
+            crop = crops[idx]
+            ax.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            # Big clear number
+            ax.set_title(f"#{i}", fontsize=16, fontweight='bold',
+                        color='white',
+                        bbox=dict(boxstyle='round,pad=0.3', 
+                                  facecolor='black', alpha=0.8))
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    plt.suptitle(
+        f"PICK YOUR TEAM — Write down the numbers of YOUR team's jerseys\n"
+        f"(Total {sample_data['n_total']} crops sampled from video)",
+        fontsize=15, fontweight='bold', y=1.02
+    )
+    plt.tight_layout()
+    plt.show()
+
+    print("\n" + "=" * 60)
+    print("  📋 In the NEXT cell, set MY_TEAM to a list of numbers")
+    print("     that show YOUR team's jersey. Example:")
+    print("     MY_TEAM = [0, 3, 5, 8, 11]")
+    print("=" * 60)
 
 
-# ---------------------------------------------------------------------------
-# Calibration finalization
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Step 3: Build calibration from user labels
+# ═══════════════════════════════════════════════════════════════════════════
 
-def finalize_calibration(cluster_data, target_cluster):
+def build_calibration(sample_data, my_team_indices):
     """
-    Step 2 of calibration: Finalize with user's team choice.
+    Build a calibration model from user-labeled samples.
+    
+    Uses the labeled examples as seeds to compute team centroids,
+    then classifies ALL crops to verify the separation quality.
     
     Args:
-        cluster_data: dict returned by discover_clusters()
-        target_cluster: int — cluster number the user identified as their team
+        sample_data: dict from collect_samples()
+        my_team_indices: list of grid numbers the user identified as their team
+                         (numbers from the displayed grid, NOT raw crop indices)
     
     Returns:
-        calibration dict ready for pipeline use
+        calibration dict for use in the pipeline
     """
-    if cluster_data is None:
-        print("ERROR: No cluster data. Run discover_clusters() first.")
+    if sample_data is None:
+        print("ERROR: No sample data.")
         return None
 
-    n_clusters = cluster_data["n_clusters"]
-    if not (0 <= target_cluster < n_clusters):
-        print(f"ERROR: target_cluster must be 0-{n_clusters - 1}, got {target_cluster}")
+    display_indices = sample_data["display_indices"]
+    X_scaled = sample_data["X_scaled"]
+    scaler = sample_data["scaler"]
+    crops = sample_data["all_crops"]
+    n_total = sample_data["n_total"]
+
+    # Convert grid numbers → actual crop indices
+    target_crop_indices = set()
+    for grid_num in my_team_indices:
+        if 0 <= grid_num < len(display_indices):
+            target_crop_indices.add(display_indices[grid_num])
+        else:
+            print(f"  ⚠️ Grid number {grid_num} out of range, skipping")
+
+    if len(target_crop_indices) < 2:
+        print("ERROR: Need at least 2 labeled samples. Try again.")
         return None
 
-    calibration = {
-        "kmeans": cluster_data["kmeans"],
-        "scaler": cluster_data["scaler"],
-        "target_cluster": target_cluster,
-        "n_clusters": n_clusters,
-        "cluster_sizes": cluster_data["cluster_sizes"],
-        "n_crops_total": cluster_data["n_crops_total"],
+    # ── Compute centroids ──
+    target_features = X_scaled[list(target_crop_indices)]
+    target_centroid = target_features.mean(axis=0)
+
+    # Everything not labeled as target → opponent seed
+    opponent_indices = [i for i in range(n_total) if i not in target_crop_indices]
+    
+    # But we also want to be smart: not everything is opponent.
+    # Some unlabeled might actually be target team.
+    # So we first classify all unlabeled by distance to target centroid,
+    # then use the FARTHEST ones as opponent seeds.
+    
+    # Compute distances of all samples to target centroid
+    all_dists_to_target = np.linalg.norm(X_scaled - target_centroid, axis=1)
+    
+    # Opponent seeds: top 50% farthest from target centroid (among unlabeled)
+    unlabeled_dists = [(i, all_dists_to_target[i]) for i in opponent_indices]
+    unlabeled_dists.sort(key=lambda x: x[1], reverse=True)
+    n_opp_seeds = max(3, len(unlabeled_dists) // 2)
+    opponent_seed_indices = [i for i, _ in unlabeled_dists[:n_opp_seeds]]
+    
+    opponent_centroid = X_scaled[opponent_seed_indices].mean(axis=0)
+
+    # ── Classify all samples ──
+    labels = np.zeros(n_total, dtype=int)  # 0 = target, 1 = opponent
+    for i in range(n_total):
+        d_target = np.linalg.norm(X_scaled[i] - target_centroid)
+        d_opponent = np.linalg.norm(X_scaled[i] - opponent_centroid)
+        labels[i] = 0 if d_target < d_opponent else 1
+
+    n_target = (labels == 0).sum()
+    n_opponent = (labels == 1).sum()
+
+    # ── Show verification grid ──
+    _show_verification(crops, labels, target_crop_indices)
+
+    print(f"\n✅ Calibration built from {len(target_crop_indices)} labeled samples!")
+    print(f"   Target team:  {n_target} crops ({n_target/n_total*100:.0f}%)")
+    print(f"   Opponent:     {n_opponent} crops ({n_opponent/n_total*100:.0f}%)")
+
+    return {
+        "target_centroid": target_centroid,
+        "opponent_centroid": opponent_centroid,
+        "scaler": scaler,
+        "target_cluster": 0,  # 0 = target by convention
+        "n_clusters": 2,
+        "cluster_sizes": {0: int(n_target), 1: int(n_opponent)},
+        "n_crops_total": n_total,
     }
 
-    sizes = cluster_data["cluster_sizes"]
-    print(f"✅ Calibration finalized!")
-    for c in range(n_clusters):
-        role = "✅ TARGET" if c == target_cluster else "   opponent/other"
-        print(f"   Cluster {c}: {sizes[c]} crops — {role}")
 
-    return calibration
+def _show_verification(crops, labels, labeled_indices):
+    """Show a verification grid: target vs opponent rows with labeled samples highlighted."""
+    fig, axes = plt.subplots(2, 10, figsize=(25, 6))
 
-
-# ---------------------------------------------------------------------------
-# Visualization
-# ---------------------------------------------------------------------------
-
-def _show_calibration_grid(crops, labels, n_clusters, samples_per_cluster=8):
-    """
-    Display sample torso crops grouped by cluster.
-    
-    Each cluster is a separate row with a clear label.
-    Shows 8 samples per cluster for better visual confirmation.
-    """
-    fig, axes = plt.subplots(
-        n_clusters, samples_per_cluster,
-        figsize=(2.5 * samples_per_cluster, 4 * n_clusters)
-    )
-    if n_clusters == 1:
-        axes = axes[np.newaxis, :]
-
-    # Color-coded backgrounds per cluster
-    row_colors = ['#FFE0E0', '#E0E0FF', '#E0FFE0']  # light red, blue, green
-
-    for c in range(n_clusters):
-        cluster_indices = np.where(labels == c)[0]
-        n_show = min(samples_per_cluster, len(cluster_indices))
-
+    for row, (team_name, team_label, color) in enumerate([
+        ("YOUR TEAM (target)", 0, '#2ECC71'),
+        ("OPPONENT", 1, '#E74C3C'),
+    ]):
+        team_indices = np.where(labels == team_label)[0]
+        n_show = min(10, len(team_indices))
         if n_show > 0:
-            show_indices = cluster_indices[
-                np.linspace(0, len(cluster_indices) - 1, n_show, dtype=int)
-            ]
+            show = team_indices[np.linspace(0, len(team_indices)-1, n_show, dtype=int)]
         else:
-            show_indices = []
+            show = []
 
-        count = int((labels == c).sum())
-        bg_color = row_colors[c % len(row_colors)]
-
-        for j in range(samples_per_cluster):
-            ax = axes[c, j]
-            ax.set_facecolor(bg_color)
-
-            if j < len(show_indices):
-                crop = crops[show_indices[j]]
+        for j in range(10):
+            ax = axes[row, j]
+            if j < len(show):
+                idx = show[j]
+                crop = crops[idx]
                 ax.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+
+                # Highlight user-labeled samples with a gold border
+                if idx in labeled_indices:
+                    for spine in ax.spines.values():
+                        spine.set_edgecolor('gold')
+                        spine.set_linewidth(4)
+                else:
+                    for spine in ax.spines.values():
+                        spine.set_edgecolor(color)
+                        spine.set_linewidth(2)
+            else:
+                ax.set_facecolor('#f0f0f0')
 
             ax.set_xticks([])
             ax.set_yticks([])
 
-            # Bold title on first image
             if j == 0:
-                ax.set_title(
-                    f"── CLUSTER {c} ({count} crops) ──",
-                    fontsize=13, fontweight='bold',
-                    color=['red', 'blue', 'green'][c % 3],
-                    pad=8
-                )
-
-            # Add border
-            for spine in ax.spines.values():
-                spine.set_edgecolor(bg_color)
-                spine.set_linewidth(3)
+                ax.set_title(team_name, fontsize=13, fontweight='bold',
+                            color=color, pad=8)
 
     plt.suptitle(
-        "TEAM IDENTIFICATION — Each row = one cluster\n"
-        "Pick the cluster number that matches YOUR team",
-        fontsize=16, fontweight='bold', y=1.02
+        "VERIFICATION — Gold borders = your labeled samples\n"
+        "Check that team separation looks correct",
+        fontsize=14, fontweight='bold', y=1.02
     )
     plt.tight_layout()
     plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Runtime classification
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Runtime classification (used by pipeline.py)
+# ═══════════════════════════════════════════════════════════════════════════
 
 def classify_person(torso_crop, calibration):
     """
-    Classify a person's team using the learned calibration.
+    Classify a person as target team, opponent, or ambiguous.
     
-    Returns: (role, confidence) where role is "target", "opponent", or "ambiguous"
+    Uses centroid distance — the torso is compared to the learned
+    target and opponent color signatures.
+    
+    Returns: (role, confidence)
+      - role: "target", "opponent", or "ambiguous"
+      - confidence: 0.0 to 1.0
     """
     if calibration is None:
         return "ambiguous", 0.0
@@ -526,20 +467,43 @@ def classify_person(torso_crop, calibration):
     if features is None:
         return "ambiguous", 0.0
 
-    X = calibration["scaler"].transform([features])
-    cluster = calibration["kmeans"].predict(X)[0]
+    X = calibration["scaler"].transform([features])[0]
 
-    # Distance-based confidence
-    center = calibration["kmeans"].cluster_centers_[cluster]
-    dist = np.linalg.norm(X[0] - center)
-    all_dists = [np.linalg.norm(X[0] - c)
-                 for c in calibration["kmeans"].cluster_centers_]
-    confidence = 1.0 - (dist / (sum(all_dists) + 1e-6))
+    # Distance to each centroid
+    d_target = np.linalg.norm(X - calibration["target_centroid"])
+    d_opponent = np.linalg.norm(X - calibration["opponent_centroid"])
 
-    if confidence < 0.35:
+    # Confidence: how much closer to one centroid vs the other
+    total = d_target + d_opponent + 1e-9
+    if d_target < d_opponent:
+        confidence = 1.0 - (d_target / total)
+        role = "target"
+    else:
+        confidence = 1.0 - (d_opponent / total)
+        role = "opponent"
+
+    # Low confidence → ambiguous
+    if confidence < 0.55:
         return "ambiguous", round(confidence, 3)
 
-    if cluster == calibration["target_cluster"]:
-        return "target", round(confidence, 3)
-    else:
-        return "opponent", round(confidence, 3)
+    return role, round(confidence, 3)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Legacy compatibility
+# ═══════════════════════════════════════════════════════════════════════════
+
+def discover_clusters(*args, **kwargs):
+    """Deprecated. Use collect_samples() + show_samples() instead."""
+    print("⚠️  discover_clusters() is deprecated.")
+    print("   Use the new 3-step flow:")
+    print("   1. sample_data = collect_samples(...)")
+    print("   2. show_samples(sample_data)")
+    print("   3. calibration = build_calibration(sample_data, MY_TEAM)")
+    return None
+
+
+def finalize_calibration(*args, **kwargs):
+    """Deprecated. Use build_calibration() instead."""
+    print("⚠️  finalize_calibration() is deprecated. Use build_calibration().")
+    return None
