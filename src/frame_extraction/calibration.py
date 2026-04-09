@@ -230,7 +230,7 @@ def finalize_calibration(cluster_data, target_cluster):
 def _show_calibration_grid(crops, labels, n_clusters, samples_per_cluster=6):
     """Display sample torso crops per cluster for user identification."""
     fig, axes = plt.subplots(n_clusters, samples_per_cluster,
-                             figsize=(3 * samples_per_cluster, 3.5 * n_clusters))
+                             figsize=(3 * samples_per_cluster, 4 * n_clusters))
     if n_clusters == 1:
         axes = axes[np.newaxis, :]
 
@@ -238,7 +238,6 @@ def _show_calibration_grid(crops, labels, n_clusters, samples_per_cluster=6):
         cluster_indices = np.where(labels == c)[0]
         n_show = min(samples_per_cluster, len(cluster_indices))
 
-        # Pick evenly spaced samples from cluster
         if n_show > 0:
             show_indices = cluster_indices[
                 np.linspace(0, len(cluster_indices) - 1, n_show, dtype=int)
@@ -246,20 +245,25 @@ def _show_calibration_grid(crops, labels, n_clusters, samples_per_cluster=6):
         else:
             show_indices = []
 
+        # Add row title for cluster
+        count = int((labels == c).sum())
+        # Add a text annotation to the far left
+        fig.text(0.01, (n_clusters - c - 0.5) / n_clusters, 
+                 f"CLUSTER {c}\n({count} crops)", 
+                 fontsize=14, fontweight='bold', va='center', rotation=90)
+
         for j in range(samples_per_cluster):
             ax = axes[c, j]
             if j < len(show_indices):
                 crop = crops[show_indices[j]]
                 ax.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                if j == 0:
+                    ax.set_title(f"CLUSTER {c}", color='red', fontsize=15, fontweight='bold')
             ax.axis("off")
-            if j == 0:
-                count = int((labels == c).sum())
-                ax.set_ylabel(f"Cluster {c}\n({count} players)",
-                              fontsize=12, fontweight="bold")
 
-    plt.suptitle("AUTO-CALIBRATION — Which cluster is YOUR TEAM?",
-                 fontsize=14, fontweight="bold")
-    plt.tight_layout()
+    plt.suptitle("MANUAL SELECTION: Identify your team's cluster", 
+                 fontsize=18, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0.03, 0.03, 1, 0.95])
     plt.show()
 
 
