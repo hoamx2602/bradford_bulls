@@ -40,14 +40,15 @@ def extract_torso_crop(frame, bbox, overlay_mask=None):
     bw, bh = x2 - x1, y2 - y1
 
     # Skip tiny detections
-    if bw < 30 or bh < 50:
+    if bw < 40 or bh < 60:
         return None, "too_small"
 
-    # Torso ROI: 20-55% of person height, 15-85% of width
-    ty1 = y1 + int(bh * 0.20)
-    ty2 = y1 + int(bh * 0.55)
-    tx1 = x1 + int(bw * 0.15)
-    tx2 = x2 - int(bw * 0.15)
+    # Torso/Jersey ROI: 10-40% of person height = upper body (jersey area)
+    # YOLO person bbox: head~0-10%, shoulders~10-25%, jersey~10-40%, shorts~40-60%
+    ty1 = y1 + int(bh * 0.10)
+    ty2 = y1 + int(bh * 0.40)
+    tx1 = x1 + int(bw * 0.10)
+    tx2 = x2 - int(bw * 0.10)
 
     # Clamp to frame bounds
     ty1, ty2 = max(0, ty1), min(h, ty2)
@@ -70,31 +71,26 @@ def extract_torso_crop(frame, bbox, overlay_mask=None):
     if skin_mask.mean() / 255 > 0.6:
         return None, "mostly_skin"
 
+    # Sharpness check: reject motion-blurred crops
+    gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
+    lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if lap_var < 100:  # Very blurry → don't use for calibration
+        return None, "too_blurry"
+
     return torso, "ok"
 
 
-def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
-                   n_sample_frames=60, min_person_area_ratio=0.01):
+def discover_clusters(video_path, yolo_model, device, overlay_mask=None,
+                      n_sample_frames=80, min_person_area_ratio=0.02):
     """
-    Auto-calibrate team colors by clustering torso color histograms.
+    Step 1 of calibration: Discover team color clusters.
     
-    Pipeline:
-    1. Sample N frames evenly across video
-    2. YOLO detect persons → crop torso regions
-    3. Extract color histograms from each torso
-    4. K-Means cluster into 2-3 groups
-    5. Show clusters → user picks which is their team
-    
-    Args:
-        video_path: Path to video file
-        yolo_model: Loaded YOLO model
-        device: "cuda" or "cpu"
-        overlay_mask: Binary overlay mask (from overlay detection)
-        n_sample_frames: Number of frames to sample
-        min_person_area_ratio: Min person area / frame area to consider
+    Samples frames, detects persons, clusters torso colors, shows grid.
+    Returns intermediate result — user then picks their team cluster
+    in the next notebook cell.
     
     Returns:
-        calibration dict with: kmeans, scaler, target_cluster, n_clusters
+        cluster_data dict (pass to finalize_calibration), or None on failure
     """
     cap = cv2.VideoCapture(str(video_path))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -107,9 +103,8 @@ def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
     end = int(total * 0.95)
     indices = np.linspace(start, end, n_sample_frames, dtype=int)
 
-    all_crops = []       # Resized torso crops for visualization
-    all_features = []    # Feature vectors for clustering
-    crop_metadata = []   # (frame_idx, bbox) for reference
+    all_crops = []
+    all_features = []
 
     print(f"Calibration: sampling {n_sample_frames} frames...")
     for idx in indices:
@@ -140,15 +135,14 @@ def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
 
             all_crops.append(cv2.resize(torso, (64, 64)))
             all_features.append(features)
-            crop_metadata.append((idx, bbox.tolist()))
 
     cap.release()
 
     n_crops = len(all_crops)
-    print(f"Collected {n_crops} valid torso crops for clustering.")
+    print(f"Collected {n_crops} valid torso crops.")
 
     if n_crops < 10:
-        print("ERROR: Too few torso crops. Try lowering confidence or checking video.")
+        print("ERROR: Too few torso crops. Try lowering confidence.")
         return None
 
     # K-Means clustering
@@ -156,7 +150,6 @@ def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Try K=2 and K=3, pick best silhouette score
     best_k, best_score, best_km, best_labels = 2, -1, None, None
     for k in [2, 3]:
         if n_crops < k * 3:
@@ -168,56 +161,64 @@ def auto_calibrate(video_path, yolo_model, device, overlay_mask=None,
         if score > best_score:
             best_k, best_score, best_km, best_labels = k, score, km, labels
 
-    print(f"  → Selected K={best_k} (silhouette={best_score:.3f})")
+    print(f"  → Selected K={best_k}")
 
-    # Print cluster summary as text (visible without scrolling)
-    cluster_sizes = {c: int((best_labels == c).sum()) for c in range(best_k)}
-    print(f"\n{'='*50}")
-    print(f"  CLUSTERS FOUND:")
-    for c in range(best_k):
-        print(f"    Cluster {c}: {cluster_sizes[c]} player crops")
-    print(f"{'='*50}")
-    print(f"  ↓↓↓ SEE JERSEY SAMPLES BELOW ↓↓↓")
-    print(f"  ↓↓↓ THEN SCROLL DOWN TO ENTER YOUR CHOICE ↓↓↓")
-    print(f"{'='*50}\n")
-
-    # Visualize clusters
+    # Show grid
     _show_calibration_grid(all_crops, best_labels, best_k)
 
-    # Prominent message after grid
-    print(f"\n{'🔻'*25}")
-    print(f"  👇 ENTER YOUR TEAM'S CLUSTER NUMBER BELOW 👇")
-    print(f"{'🔻'*25}\n")
-
-    # User selects target team
-    while True:
-        try:
-            target = int(input(
-                f"→ Which cluster is YOUR TEAM? Enter number (0-{best_k - 1}): "
-            ))
-            if 0 <= target < best_k:
-                break
-            print(f"  Please enter a number between 0 and {best_k - 1}")
-        except ValueError:
-            print("  Please enter a valid number")
-
-    # Build calibration result
+    # Print summary
     cluster_sizes = {c: int((best_labels == c).sum()) for c in range(best_k)}
-    calibration = {
+    print(f"\n{'='*55}")
+    for c in range(best_k):
+        print(f"  Cluster {c}: {cluster_sizes[c]} player crops")
+    print(f"{'='*55}")
+    print(f"\n  ✏️  In the NEXT cell, set TARGET_CLUSTER to your")
+    print(f"      team's cluster number (0-{best_k - 1}), then run it.\n")
+
+    return {
         "kmeans": best_km,
         "scaler": scaler,
-        "target_cluster": target,
+        "labels": best_labels,
         "n_clusters": best_k,
         "cluster_sizes": cluster_sizes,
         "n_crops_total": n_crops,
     }
 
-    target_count = cluster_sizes[target]
-    print(f"\n✅ Calibration complete!")
-    print(f"   Target team: Cluster {target} ({target_count} crops)")
-    for c in range(best_k):
-        role = "TARGET" if c == target else "opponent/other"
-        print(f"   Cluster {c}: {cluster_sizes[c]} crops — {role}")
+
+def finalize_calibration(cluster_data, target_cluster):
+    """
+    Step 2 of calibration: Finalize with user's team choice.
+    
+    Args:
+        cluster_data: dict returned by discover_clusters()
+        target_cluster: int — cluster number the user identified as their team
+    
+    Returns:
+        calibration dict ready for pipeline use
+    """
+    if cluster_data is None:
+        print("ERROR: No cluster data. Run discover_clusters() first.")
+        return None
+
+    n_clusters = cluster_data["n_clusters"]
+    if not (0 <= target_cluster < n_clusters):
+        print(f"ERROR: target_cluster must be 0-{n_clusters - 1}, got {target_cluster}")
+        return None
+
+    calibration = {
+        "kmeans": cluster_data["kmeans"],
+        "scaler": cluster_data["scaler"],
+        "target_cluster": target_cluster,
+        "n_clusters": n_clusters,
+        "cluster_sizes": cluster_data["cluster_sizes"],
+        "n_crops_total": cluster_data["n_crops_total"],
+    }
+
+    sizes = cluster_data["cluster_sizes"]
+    print(f"✅ Calibration finalized!")
+    for c in range(n_clusters):
+        role = "✅ TARGET" if c == target_cluster else "   opponent/other"
+        print(f"   Cluster {c}: {sizes[c]} crops — {role}")
 
     return calibration
 
