@@ -230,10 +230,6 @@ def pass2_extract(video_path, segments, yolo_model, device,
         seg_end = segment[-1][0] + scan_interval
         seg_duration = (seg_end - seg_start) / fps
 
-        n_pick = (p["FRAMES_PER_LONG_SEGMENT"]
-                  if seg_duration >= p["LONG_SEGMENT_THRESHOLD"]
-                  else p["FRAMES_PER_SHORT_SEGMENT"])
-
         cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start)
         seg_candidates = []
 
