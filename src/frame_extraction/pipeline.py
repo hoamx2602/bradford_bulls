@@ -239,21 +239,48 @@ def pass2_extract(video_path, segments, yolo_model, device,
                 break
             stats["frames_analyzed"] += 1
 
-            # ── Smart pitch filter ──
+            # ── Pitch green (soft signal, NOT a hard filter) ──
             pitch_green = compute_pitch_green_ratio(frame, p["PITCH_ROI_Y_START"])
 
             # ── Person detection ──
             detections = detect_persons(yolo_model, frame, device,
                                         p["PERSON_CONFIDENCE"])
 
-            if p["ENABLE_PITCH_GREEN_FILTER"]:
-                if not smart_pitch_filter(pitch_green, detections, frame_area,
-                                          p["MIN_PITCH_GREEN_RATIO"]):
+            if len(detections) < p["MIN_PERSONS"]:
+                # Check pitch mask. No players + No green (e.g. locker room, sky) -> skip
+                if p["ENABLE_PITCH_GREEN_FILTER"] and pitch_green < p["MIN_PITCH_GREEN_RATIO"]:
                     stats["skipped_pitch"] += 1
                     continue
-
-            if len(detections) < p["MIN_PERSONS"]:
-                stats["skipped_no_person"] += 1
+                
+                # Retrieve background image context (Null frame)
+                sharpness = compute_player_sharpness(frame, [], overlay_mask)
+                if sharpness < p["MOTION_BLUR_SHARPNESS_MIN"]:
+                    stats["skipped_blurry"] += 1
+                    continue
+                    
+                timestamp_sec = fn / fps
+                seg_candidates.append({
+                    "frame_num": fn,
+                    "timestamp_sec": round(timestamp_sec, 2),
+                    "timestamp_hms": fmt_timestamp(timestamp_sec),
+                    "n_persons": 0,
+                    "n_target": 0,
+                    "n_opponent": 0,
+                    "n_ambiguous": 0,
+                    "team_dominance": 0.0,
+                    "category": "background",
+                    "shot_type": "wide",
+                    "sharpness": round(sharpness, 4),
+                    "is_motion_blur": sharpness < p["MIN_SHARPNESS"],
+                    "max_person_area_ratio": 0.0,
+                    "max_target_area_ratio": 0.0,
+                    "target_coverage": 0.0,
+                    "pitch_green_ratio": round(pitch_green, 4),
+                    "score": round(sharpness * 0.3 + pitch_green * 0.2, 4),
+                    "segment_idx": seg_idx,
+                    "segment_duration": round(seg_duration, 1),
+                })
+                # Track as processed background frame, do not skip
                 continue
 
             # ── Foreground filter (remove crowd) ──
@@ -266,9 +293,10 @@ def pass2_extract(video_path, segments, yolo_model, device,
             # ── Team classification ──
             n_target, n_opponent, n_ambiguous = 0, 0, 0
             for det in fg_detections:
-                torso, status = extract_torso_crop(frame, det["bbox"], overlay_mask)
+                torso, status, torso_ov_mask = extract_torso_crop(
+                    frame, det["bbox"], overlay_mask)
                 if status == "ok" and torso is not None:
-                    team, conf = classify_person(torso, calibration)
+                    team, conf = classify_person(torso, calibration, torso_ov_mask)
                     det["team"] = team
                     det["team_conf"] = conf
                 else:
@@ -288,6 +316,16 @@ def pass2_extract(video_path, segments, yolo_model, device,
                 n_target, n_opponent, n_ambiguous, max_person_ratio
             )
 
+            # ── Soft pitch filter: skip only no-pitch + no-target frames ──
+            # Frames with target players are ALWAYS kept regardless of pitch
+            if p["ENABLE_PITCH_GREEN_FILTER"]:
+                has_target = n_target > 0
+                has_large_person = max_person_ratio > 0.06
+                if (not has_target and not has_large_person
+                        and pitch_green < p["MIN_PITCH_GREEN_RATIO"]):
+                    stats["skipped_pitch"] += 1
+                    continue
+
             # ── Sharpness (overlay-masked, prefer target team) ──
             target_dets = [d for d in fg_detections if d.get("team") == "target"]
             sharpness_dets = target_dets if target_dets else fg_detections
@@ -299,10 +337,11 @@ def pass2_extract(video_path, segments, yolo_model, device,
 
             is_motion_blur = sharpness < p["MIN_SHARPNESS"]
 
-            # ── Team-aware scoring ──
+            # ── Team-aware scoring (pitch_green as soft bonus) ──
             score = _compute_team_score(
                 sharpness, fg_detections, frame_area, category,
-                n_target, n_opponent, max_person_ratio
+                n_target, n_opponent, max_person_ratio,
+                pitch_green
             )
 
             # ── Target area metrics ──
@@ -346,6 +385,7 @@ def pass2_extract(video_path, segments, yolo_model, device,
     cap.release()
 
     # Update stats
+    stats["team_background"] = 0
     for c in candidates:
         cat = c["category"]
         if "target" in cat:
@@ -354,6 +394,8 @@ def pass2_extract(video_path, segments, yolo_model, device,
             stats["team_opponent"] += 1
         elif cat == "mixed":
             stats["team_mixed"] += 1
+        elif cat == "background":
+            stats["team_background"] += 1
         else:
             stats["team_ambiguous"] += 1
 
@@ -380,33 +422,45 @@ def _categorize_frame(n_target, n_opponent, n_ambiguous, max_person_ratio):
 
 
 def _compute_team_score(sharpness, detections, frame_area, category,
-                        n_target, n_opponent, max_person_ratio):
-    """Compute team-aware quality score for frame selection."""
+                        n_target, n_opponent, max_person_ratio,
+                        pitch_green=0.0):
+    """Compute team-aware quality score for frame selection.
+
+    pitch_green acts as a soft bonus (0.05 weight) — frames with visible
+    pitch get a small boost, but frames without pitch are NOT penalized
+    if they have strong target player presence.
+    """
     target_dets = [d for d in detections if d.get("team") == "target"]
     max_target_ratio = (max(d["area"] / frame_area for d in target_dets)
                         if target_dets else 0.0)
 
+    # Soft pitch bonus: 0 to 0.05
+    pitch_bonus = min(pitch_green / 0.10, 1.0) * 0.05
+
     if "target" in category:
         score = (
-            sharpness * 0.30 +
+            sharpness * 0.25 +
             max_target_ratio * 0.25 +
             min(n_target / 4, 1.0) * 0.20 +
             max_person_ratio * 0.15 +
-            0.10  # category bonus
+            0.10 +  # category bonus
+            pitch_bonus
         )
     elif category == "mixed":
         score = (
-            sharpness * 0.35 +
+            sharpness * 0.30 +
             max_person_ratio * 0.25 +
             min((n_target + n_opponent) / 5, 1.0) * 0.15 +
             (n_target / max(n_target + n_opponent, 1)) * 0.15 +
-            0.05
+            0.05 +
+            pitch_bonus
         )
     else:  # opponent or ambiguous
         score = (
-            sharpness * 0.45 +
+            sharpness * 0.40 +
             max_person_ratio * 0.30 +
-            min(len(detections) / 5, 1.0) * 0.15
+            min(len(detections) / 5, 1.0) * 0.15 +
+            pitch_bonus
         )
 
     return round(score, 4)

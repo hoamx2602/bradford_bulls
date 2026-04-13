@@ -12,15 +12,49 @@ import numpy as np
 from .helpers import compute_phash
 
 
+def auto_target_frames(candidates, video_duration_sec,
+                       max_candidate_ratio=0.8,
+                       floor=100, ceiling=600):
+    """
+    Automatically compute how many frames to select.
+    Non-linear scaling: Highlights (short) get higher density, full matches get normal density.
+    """
+    duration_min = video_duration_sec / 60.0
+    
+    # Calculate adaptive target density
+    if duration_min <= 15:
+        frames_per_minute = 15     # e.g., 10min -> 150 frames
+    elif duration_min <= 45:
+        frames_per_minute = 8      # e.g., 40min -> 320 frames
+    else:
+        frames_per_minute = 5      # e.g., 80min -> 400 frames
+
+    base = int(duration_min * frames_per_minute)
+    pool_limit = int(len(candidates) * max_candidate_ratio)
+    
+    # Ensure result honors max ratio cap but doesn't go below floor if pool is large enough
+    capped = min(base, pool_limit)
+    result = max(capped, min(floor, pool_limit))
+    result = min(result, ceiling)
+
+    print(f"  Auto TARGET_FRAMES: {result}")
+    print(f"    Video: {duration_min:.1f} min → Density: {frames_per_minute}/min → Base: {base}")
+    print(f"    Candidates: {len(candidates)} (Cap {max_candidate_ratio*100:.0f}% = {pool_limit})")
+    print(f"    Bounds: [{min(floor, len(candidates))}, {ceiling}]")
+
+    return result
+
+
 # Default quotas — adjust for your use case
 DEFAULT_QUOTA = {
     "target_closeup":   0.30,
-    "target_medium":    0.25,
-    "target_wide":      0.05,
-    "mixed":            0.20,
+    "target_medium":    0.20,
+    "mixed":            0.15,
     "opponent_closeup": 0.08,
     "opponent_medium":  0.07,
+    "target_wide":      0.05,
     "opponent_wide":    0.05,
+    "background":       0.10,
 }
 
 

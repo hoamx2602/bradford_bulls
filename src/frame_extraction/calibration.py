@@ -40,12 +40,17 @@ def _build_gaussian_weights(h, w, sigma=0.4):
     return np.exp(-0.5 * (xx**2 + yy**2) / sigma**2).astype(np.float32)
 
 
-def extract_torso_features(torso_crop):
+def extract_torso_features(torso_crop, overlay_crop_mask=None):
     """
     Compute a 300-dim weighted HSV histogram for the torso crop.
-    
-    Green pixels (grass) are masked out, and center pixels are weighted
-    higher than edges (Gaussian weighting).
+
+    Weights combine three masks:
+      1. Gaussian center emphasis (edges less important)
+      2. Green exclusion (grass pixels zeroed out)
+      3. Overlay exclusion (scoreboard/text pixels zeroed out)
+
+    This ensures text overlays like "LDN", "BRA 4th" etc. don't
+    contaminate the jersey color signature.
     """
     if torso_crop is None or torso_crop.size < 200:
         return None
@@ -53,8 +58,18 @@ def extract_torso_features(torso_crop):
     hsv = cv2.cvtColor(torso_crop, cv2.COLOR_BGR2HSV)
     h, w = torso_crop.shape[:2]
 
-    # Combined weight: center emphasis × green exclusion
+    # Combined weight: center emphasis × green exclusion × overlay exclusion
     weights = _build_gaussian_weights(h, w, 0.4) * _build_green_mask(hsv)
+
+    if overlay_crop_mask is not None:
+        # overlay_crop_mask: 1=clean pixel, 0=overlay pixel
+        # Resize to match torso crop if needed
+        if overlay_crop_mask.shape[:2] != (h, w):
+            overlay_crop_mask = cv2.resize(
+                overlay_crop_mask.astype(np.float32), (w, h),
+                interpolation=cv2.INTER_NEAREST
+            )
+        weights *= overlay_crop_mask.astype(np.float32)
 
     if weights.sum() < 50:
         return None
@@ -95,21 +110,24 @@ def extract_torso_crop(frame, bbox, overlay_mask=None, strict=False):
         strict: True during calibration (rejects blurry); False at runtime
     Returns:
         (torso_crop, status_string)
+        When overlay_mask is provided and the crop passes, the torso's
+        overlay mask slice is stored as torso_crop._overlay_mask_crop
+        (a numpy array) for use in feature extraction.
     """
     fh, fw = frame.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in bbox]
     bw, bh = x2 - x1, y2 - y1
 
     if bw < 40 or bh < 60:
-        return None, "too_small"
+        return None, "too_small", None
 
     # Close-up filter: large bbox = likely TV close-up of staff/coach
     if (bw * bh) / (fh * fw) > 0.20:
-        return None, "close_up"
+        return None, "close_up", None
 
     # Standing player check: height should be > width
     if bh / max(bw, 1) < 1.0:
-        return None, "bad_aspect"
+        return None, "bad_aspect", None
 
     # Jersey ROI: 10-40% of person height
     ty1 = max(0, y1 + int(bh * 0.10))
@@ -118,34 +136,38 @@ def extract_torso_crop(frame, bbox, overlay_mask=None, strict=False):
     tx2 = min(fw, x2 - int(bw * 0.10))
 
     if ty2 - ty1 < 15 or tx2 - tx1 < 15:
-        return None, "crop_too_small"
+        return None, "crop_too_small", None
 
     torso = frame[ty1:ty2, tx1:tx2]
 
-    # Overlay check
+    # Overlay check — reject crops with >25% overlay contamination
+    # (stricter than before: old threshold was 50%)
+    torso_overlay_crop = None
     if overlay_mask is not None:
-        if overlay_mask[ty1:ty2, tx1:tx2].mean() < 0.5:
-            return None, "overlay"
+        torso_overlay_crop = overlay_mask[ty1:ty2, tx1:tx2]
+        clean_ratio = torso_overlay_crop.mean()
+        if clean_ratio < 0.75:
+            return None, "overlay", None
 
     hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
 
     # Skin check
     skin = cv2.inRange(hsv, (0, 30, 60), (25, 180, 255))
     if skin.mean() / 255 > 0.6:
-        return None, "mostly_skin"
+        return None, "mostly_skin", None
 
     # Grass check
     grass = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
     if grass.mean() / 255 > 0.5:
-        return None, "mostly_grass"
+        return None, "mostly_grass", None
 
     # Sharpness (calibration only)
     if strict:
         gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
         if cv2.Laplacian(gray, cv2.CV_64F).var() < 100:
-            return None, "blurry"
+            return None, "blurry", None
 
-    return torso, "ok"
+    return torso, "ok", torso_overlay_crop
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -194,12 +216,13 @@ def collect_samples(video_path, yolo_model, device, overlay_mask=None,
             if area / frame_area < 0.02:
                 continue
 
-            torso, status = extract_torso_crop(frame, bbox, overlay_mask, strict=True)
+            torso, status, torso_ov_mask = extract_torso_crop(
+                frame, bbox, overlay_mask, strict=True)
             if status != "ok":
                 reject_counts[status] = reject_counts.get(status, 0) + 1
                 continue
 
-            feat = extract_torso_features(torso)
+            feat = extract_torso_features(torso, torso_ov_mask)
             if feat is None:
                 continue
 
@@ -310,15 +333,22 @@ def show_samples(sample_data):
 def build_calibration(sample_data, my_team_indices):
     """
     Build a calibration model from user-labeled samples.
-    
-    Uses the labeled examples as seeds to compute team centroids,
-    then classifies ALL crops to verify the separation quality.
-    
+
+    Uses k-NN approach instead of single centroid:
+      1. User-labeled target samples → target reference set
+      2. Semi-supervised expansion: find unlabeled samples close to ANY
+         labeled target sample → expand target set
+      3. Confidently far samples → opponent reference set
+      4. Runtime: classify via min distance to target refs vs opponent refs
+
+    This handles intra-class variety (e.g., dark jersey under different
+    lighting) much better than a single mean centroid.
+
     Args:
         sample_data: dict from collect_samples()
         my_team_indices: list of grid numbers the user identified as their team
                          (numbers from the displayed grid, NOT raw crop indices)
-    
+
     Returns:
         calibration dict for use in the pipeline
     """
@@ -344,35 +374,95 @@ def build_calibration(sample_data, my_team_indices):
         print("ERROR: Need at least 2 labeled samples. Try again.")
         return None
 
-    # ── Compute centroids ──
-    target_features = X_scaled[list(target_crop_indices)]
-    target_centroid = target_features.mean(axis=0)
+    # ── Step 1: Compute pairwise distances from labeled targets ──
+    labeled_target_features = X_scaled[list(target_crop_indices)]
 
-    # Everything not labeled as target → opponent seed
-    opponent_indices = [i for i in range(n_total) if i not in target_crop_indices]
-    
-    # But we also want to be smart: not everything is opponent.
-    # Some unlabeled might actually be target team.
-    # So we first classify all unlabeled by distance to target centroid,
-    # then use the FARTHEST ones as opponent seeds.
-    
-    # Compute distances of all samples to target centroid
-    all_dists_to_target = np.linalg.norm(X_scaled - target_centroid, axis=1)
-    
-    # Opponent seeds: top 50% farthest from target centroid (among unlabeled)
-    unlabeled_dists = [(i, all_dists_to_target[i]) for i in opponent_indices]
-    unlabeled_dists.sort(key=lambda x: x[1], reverse=True)
-    n_opp_seeds = max(3, len(unlabeled_dists) // 2)
-    opponent_seed_indices = [i for i, _ in unlabeled_dists[:n_opp_seeds]]
-    
-    opponent_centroid = X_scaled[opponent_seed_indices].mean(axis=0)
+    # For each sample, compute distance to NEAREST labeled target
+    # (not the mean centroid — this preserves variety)
+    min_dist_to_target = np.full(n_total, np.inf)
+    for tf in labeled_target_features:
+        dists = np.linalg.norm(X_scaled - tf, axis=1)
+        min_dist_to_target = np.minimum(min_dist_to_target, dists)
 
-    # ── Classify all samples ──
-    labels = np.zeros(n_total, dtype=int)  # 0 = target, 1 = opponent
-    for i in range(n_total):
-        d_target = np.linalg.norm(X_scaled[i] - target_centroid)
-        d_opponent = np.linalg.norm(X_scaled[i] - opponent_centroid)
-        labels[i] = 0 if d_target < d_opponent else 1
+    # ── Step 2: Semi-supervised expansion ──
+    # When the user already labeled many samples (≥40% of display grid),
+    # skip expansion — the labeled set is already representative.
+    # Otherwise, expand conservatively using intra-target distances.
+    labeled_list = list(target_crop_indices)
+    label_ratio = len(target_crop_indices) / max(n_total, 1)
+
+    if label_ratio >= 0.3:
+        # User labeled enough — trust their labels directly, no expansion
+        expanded_target = set(target_crop_indices)
+        print(f"  Using {len(expanded_target)} labeled targets directly "
+              f"(label ratio {label_ratio:.0%}, no expansion needed)")
+    else:
+        # Few labels — expand conservatively
+        intra_target_dists = []
+        for i in range(len(labeled_list)):
+            for j in range(i + 1, len(labeled_list)):
+                intra_target_dists.append(
+                    np.linalg.norm(X_scaled[labeled_list[i]] - X_scaled[labeled_list[j]])
+                )
+        if intra_target_dists:
+            expand_radius = np.median(intra_target_dists) * 1.0
+        else:
+            expand_radius = np.percentile(min_dist_to_target, 25)
+
+        expanded_target = set(target_crop_indices)
+        for i in range(n_total):
+            if i not in target_crop_indices and min_dist_to_target[i] <= expand_radius:
+                expanded_target.add(i)
+        print(f"  Expanded {len(target_crop_indices)} labeled → "
+              f"{len(expanded_target)} target samples "
+              f"(radius={expand_radius:.2f})")
+
+    # ── Step 3: Build opponent reference set ──
+    # Opponent = all samples NOT in expanded target set
+    non_target_all = [(i, min_dist_to_target[i]) for i in range(n_total)
+                      if i not in expanded_target]
+    non_target_all.sort(key=lambda x: x[1], reverse=True)
+
+    if len(non_target_all) >= 3:
+        # Use farthest 70% of non-target as confident opponent refs
+        n_opp = max(3, int(len(non_target_all) * 0.7))
+        opponent_indices = [i for i, _ in non_target_all[:n_opp]]
+    else:
+        # Very few non-target samples — use all of them
+        # This happens when most samples are genuinely target team
+        opponent_indices = [i for i, _ in non_target_all]
+
+    # Last resort: if truly zero opponents, use the farthest samples
+    # from labeled targets regardless of expansion
+    if len(opponent_indices) == 0:
+        all_by_dist = sorted(range(n_total),
+                             key=lambda i: min_dist_to_target[i], reverse=True)
+        # Take farthest 20% that were NOT user-labeled
+        n_force = max(3, n_total // 5)
+        opponent_indices = [i for i in all_by_dist
+                            if i not in target_crop_indices][:n_force]
+        print(f"  ⚠️ Few opponent samples — forced {len(opponent_indices)} "
+              f"from farthest non-labeled crops")
+
+    # Store reference feature sets (for k-NN at runtime)
+    target_refs = X_scaled[list(expanded_target)]
+    opponent_refs = X_scaled[opponent_indices] if opponent_indices else None
+
+    # Also keep centroids for backward compatibility and as fallback
+    target_centroid = target_refs.mean(axis=0)
+    opponent_centroid = (opponent_refs.mean(axis=0) if opponent_refs is not None
+                         else target_centroid)  # degenerate case
+
+    # ── Classify all samples for verification ──
+    labels = np.zeros(n_total, dtype=int)
+    if opponent_refs is not None and len(opponent_refs) > 0:
+        for i in range(n_total):
+            d_t = np.min(np.linalg.norm(target_refs - X_scaled[i], axis=1))
+            d_o = np.min(np.linalg.norm(opponent_refs - X_scaled[i], axis=1))
+            labels[i] = 0 if d_t <= d_o else 1
+    else:
+        # No opponents found — all are target
+        labels[:] = 0
 
     n_target = (labels == 0).sum()
     n_opponent = (labels == 1).sum()
@@ -380,18 +470,23 @@ def build_calibration(sample_data, my_team_indices):
     # ── Show verification grid ──
     _show_verification(crops, labels, target_crop_indices)
 
-    print(f"\n✅ Calibration built from {len(target_crop_indices)} labeled samples!")
+    print(f"\n✅ Calibration built from {len(target_crop_indices)} labeled → "
+          f"{len(expanded_target)} expanded target samples")
     print(f"   Target team:  {n_target} crops ({n_target/n_total*100:.0f}%)")
     print(f"   Opponent:     {n_opponent} crops ({n_opponent/n_total*100:.0f}%)")
 
     return {
+        "target_refs": target_refs,
+        "opponent_refs": opponent_refs,
         "target_centroid": target_centroid,
         "opponent_centroid": opponent_centroid,
         "scaler": scaler,
-        "target_cluster": 0,  # 0 = target by convention
+        "target_cluster": 0,
         "n_clusters": 2,
         "cluster_sizes": {0: int(n_target), 1: int(n_opponent)},
         "n_crops_total": n_total,
+        "n_labeled": len(target_crop_indices),
+        "n_expanded": len(expanded_target),
     }
 
 
@@ -449,13 +544,22 @@ def _show_verification(crops, labels, labeled_indices):
 # Runtime classification (used by pipeline.py)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def classify_person(torso_crop, calibration):
+def classify_person(torso_crop, calibration, overlay_crop_mask=None):
     """
     Classify a person as target team, opponent, or ambiguous.
-    
-    Uses centroid distance — the torso is compared to the learned
-    target and opponent color signatures.
-    
+
+    Uses k-NN: computes minimum distance to any target reference sample
+    vs minimum distance to any opponent reference sample.
+    This handles intra-class variety much better than single centroid.
+
+    Falls back to centroid distance if reference sets are not available
+    (backward compatibility).
+
+    Args:
+        overlay_crop_mask: overlay mask for the torso region (1=clean, 0=overlay).
+            Passed through to extract_torso_features so overlay text
+            pixels are excluded from the color histogram.
+
     Returns: (role, confidence)
       - role: "target", "opponent", or "ambiguous"
       - confidence: 0.0 to 1.0
@@ -463,17 +567,24 @@ def classify_person(torso_crop, calibration):
     if calibration is None:
         return "ambiguous", 0.0
 
-    features = extract_torso_features(torso_crop)
+    features = extract_torso_features(torso_crop, overlay_crop_mask)
     if features is None:
         return "ambiguous", 0.0
 
     X = calibration["scaler"].transform([features])[0]
 
-    # Distance to each centroid
-    d_target = np.linalg.norm(X - calibration["target_centroid"])
-    d_opponent = np.linalg.norm(X - calibration["opponent_centroid"])
+    # k-NN: min distance to reference sets
+    target_refs = calibration.get("target_refs")
+    opponent_refs = calibration.get("opponent_refs")
+    if target_refs is not None and opponent_refs is not None and len(opponent_refs) > 0:
+        d_target = float(np.min(np.linalg.norm(target_refs - X, axis=1)))
+        d_opponent = float(np.min(np.linalg.norm(opponent_refs - X, axis=1)))
+    else:
+        # Fallback: centroid distance
+        d_target = np.linalg.norm(X - calibration["target_centroid"])
+        d_opponent = np.linalg.norm(X - calibration["opponent_centroid"])
 
-    # Confidence: how much closer to one centroid vs the other
+    # Confidence: ratio of distance difference
     total = d_target + d_opponent + 1e-9
     if d_target < d_opponent:
         confidence = 1.0 - (d_target / total)
@@ -483,7 +594,7 @@ def classify_person(torso_crop, calibration):
         role = "opponent"
 
     # Low confidence → ambiguous
-    if confidence < 0.55:
+    if confidence < 0.53:
         return "ambiguous", round(confidence, 3)
 
     return role, round(confidence, 3)

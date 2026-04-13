@@ -23,3 +23,7 @@ PLAN.md
 output/
 src/__pycache__/
 logs/
+frames/
+metadata/
+videos/
+src/frame_extraction/__pycache__
