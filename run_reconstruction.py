@@ -482,7 +482,7 @@ def main():
         print(f"  Temporal:  ±{args.temporal_radius} frames")
     print(f"  Output:    {output_dir}")
     if device.type == "cuda":
-        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"  Device:    {torch.cuda.get_device_name(0)} ({gpu_mem:.1f} GB)")
     else:
         print("  Device:    CPU (will be slow)")
