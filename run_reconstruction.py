@@ -299,7 +299,7 @@ def reconstruct_rvrt(model, frames, center_idx, device,
     _, _, _, pH, pW = tensor.shape
 
     if pH <= tile_h * 1.5 and pW <= tile_w * 1.5:
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        with torch.no_grad():
             output = model(tensor)
         result = output[0, center_idx].cpu().permute(1, 2, 0).numpy()
         result = np.clip(result * 255, 0, 255).astype(np.uint8)[:H, :W]
@@ -321,7 +321,7 @@ def reconstruct_rvrt(model, frames, center_idx, device,
     for y in y_pos:
         for x in x_pos:
             tile = tensor[:, :, :, y:y + tile_h, x:x + tile_w]
-            with torch.no_grad(), torch.cuda.amp.autocast():
+            with torch.no_grad():
                 out_tile = model(tile).cpu()
 
             w = torch.ones(1, 1, 1, tile_h, tile_w)
