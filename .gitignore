@@ -27,3 +27,4 @@ frames/
 metadata/
 videos/
 src/frame_extraction/__pycache__
+weights/
