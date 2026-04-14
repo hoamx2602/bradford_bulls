@@ -487,7 +487,7 @@ Examples:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         print(f"{torch.cuda.get_device_name(0)} "
-              f"({torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB)")
+              f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)")
     else:
         print("CPU (WARNING: will be very slow)")
     print()
