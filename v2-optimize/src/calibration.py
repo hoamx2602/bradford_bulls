@@ -186,7 +186,7 @@ def collect_samples(video_path, yolo_model, device, overlay_mask=None,
             if feat is None:
                 continue
 
-            all_crops.append(cv2.resize(torso, (64, 64)))
+            all_crops.append(cv2.resize(torso, (128, 128)))
             all_features.append(feat)
 
     cap.release()
@@ -230,8 +230,25 @@ def collect_samples(video_path, yolo_model, device, overlay_mask=None,
 # Step 2: Show numbered grid
 # ═══════════════════════════════════════════════════════════════════════
 
+def _get_dominant_color(crop_bgr):
+    """Get the dominant non-green jersey color as a hex string + RGB tuple."""
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    # Mask out green (grass) and very dark (shadows) pixels
+    green = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
+    dark = hsv[:, :, 2] < 30
+    valid = (green == 0) & (~dark)
+    if valid.sum() < 20:
+        return '#808080', (128, 128, 128)
+
+    rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    pixels = rgb[valid]
+    mean_color = pixels.mean(axis=0).astype(int)
+    r, g, b = mean_color
+    return f'#{r:02x}{g:02x}{b:02x}', (r, g, b)
+
+
 def show_samples(sample_data):
-    """Display a numbered grid of diverse torso crop samples."""
+    """Display a numbered grid of diverse torso crop samples with color bars."""
     if sample_data is None:
         print("ERROR: No sample data. Run collect_samples() first.")
         return
@@ -243,7 +260,7 @@ def show_samples(sample_data):
     cols = min(6, n)
     rows = (n + cols - 1) // cols
 
-    fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3.5 * rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(3.5 * cols, 4.5 * rows))
     if rows == 1:
         axes = axes[np.newaxis, :]
     if cols == 1:
@@ -254,7 +271,11 @@ def show_samples(sample_data):
         if i < n:
             idx = indices[i]
             crop = crops[idx]
+            # Show crop at full 128×128 resolution
             ax.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            # Dominant color bar at bottom
+            hex_color, _ = _get_dominant_color(crop)
+            ax.axhspan(crop.shape[0] - 12, crop.shape[0], color=hex_color, alpha=0.9)
             ax.set_title(f"#{i}", fontsize=16, fontweight='bold',
                         color='white',
                         bbox=dict(boxstyle='round,pad=0.3',
@@ -264,11 +285,98 @@ def show_samples(sample_data):
 
     plt.suptitle(
         f"PICK YOUR TEAM — Write down the numbers of YOUR team's jerseys\n"
+        f"Color bar at bottom shows dominant jersey color\n"
         f"(Total {sample_data['n_total']} crops sampled from video)",
         fontsize=15, fontweight='bold', y=1.02
     )
     plt.tight_layout()
     plt.show()
+
+
+def confirm_selection(sample_data, my_team_indices):
+    """
+    Show the user exactly which crops they selected, at large size,
+    so they can verify before proceeding.
+
+    Returns:
+        my_team_indices (potentially filtered if user says some are wrong)
+    """
+    display_indices = sample_data["display_indices"]
+    crops = sample_data["all_crops"]
+
+    valid = [i for i in my_team_indices if 0 <= i < len(display_indices)]
+    n = len(valid)
+    if n == 0:
+        print("ERROR: No valid selections.")
+        return []
+
+    cols = min(n, 6)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4.5 * rows))
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes[np.newaxis, :]
+    elif cols == 1:
+        axes = axes[:, np.newaxis]
+
+    print(f"\n  You selected {n} crops:")
+    for i, grid_num in enumerate(valid):
+        ax = axes[i // cols, i % cols]
+        idx = display_indices[grid_num]
+        crop = crops[idx]
+        ax.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        hex_color, (r, g, b) = _get_dominant_color(crop)
+        # Thick color border
+        for spine in ax.spines.values():
+            spine.set_edgecolor(hex_color)
+            spine.set_linewidth(5)
+        # Brightness label
+        brightness = 0.299 * r + 0.587 * g + 0.114 * b
+        color_label = "LIGHT" if brightness > 140 else "DARK"
+        ax.set_title(f"#{grid_num} — {color_label} ({hex_color})",
+                    fontsize=12, fontweight='bold')
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Hide empty axes
+    for i in range(n, rows * cols):
+        axes[i // cols, i % cols].set_visible(False)
+
+    plt.suptitle(
+        "⚠️ CONFIRM — Are ALL these crops from THE SAME team?\n"
+        "If any crop is from the OPPONENT, remove its number and re-run.",
+        fontsize=15, fontweight='bold', color='#e74c3c', y=1.02
+    )
+    plt.tight_layout()
+    plt.show()
+
+    # Print color consistency check
+    colors = []
+    for grid_num in valid:
+        idx = display_indices[grid_num]
+        _, (r, g, b) = _get_dominant_color(crops[idx])
+        brightness = 0.299 * r + 0.587 * g + 0.114 * b
+        colors.append((grid_num, brightness, r, g, b))
+
+    brightnesses = [c[1] for c in colors]
+    bright_range = max(brightnesses) - min(brightnesses)
+
+    if bright_range > 80:
+        print(f"\n  ⚠️  WARNING: Your selections have VERY different brightness levels!")
+        print(f"      Brightness range: {min(brightnesses):.0f} — {max(brightnesses):.0f} "
+              f"(diff={bright_range:.0f})")
+        light_crops = [c[0] for c in colors if c[1] > 140]
+        dark_crops = [c[0] for c in colors if c[1] <= 140]
+        if light_crops and dark_crops:
+            print(f"      LIGHT crops: {light_crops}")
+            print(f"      DARK crops:  {dark_crops}")
+            print(f"      → Are these really all the same team?")
+            print(f"      → If not, remove the wrong ones and re-run.")
+    else:
+        print(f"  ✅ Color consistency OK (brightness range: {bright_range:.0f})")
+
+    return valid
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -309,13 +417,23 @@ def build_calibration(sample_data, my_team_indices):
         min_dist_to_target = np.minimum(min_dist_to_target, dists)
 
     labeled_list = list(target_crop_indices)
-    label_ratio = len(target_crop_indices) / max(n_total, 1)
 
-    if label_ratio >= 0.3:
+    # Use DISPLAY-based ratio (how many grid items the user labeled)
+    # NOT total-based (which underestimates when total >> displayed)
+    display_label_ratio = len(my_team_indices) / max(len(display_indices), 1)
+    total_label_ratio = len(target_crop_indices) / max(n_total, 1)
+    print(f"  Label ratio: {len(my_team_indices)}/{len(display_indices)} "
+          f"displayed ({display_label_ratio:.0%}), "
+          f"{len(target_crop_indices)}/{n_total} total ({total_label_ratio:.0%})")
+
+    if display_label_ratio >= 0.30:
+        # User labeled ≥30% of displayed grid → they've seen enough variety.
+        # Skip expansion — use ONLY labeled samples + k-NN classification.
         expanded_target = set(target_crop_indices)
         print(f"  Using {len(expanded_target)} labeled targets directly "
-              f"(label ratio {label_ratio:.0%}, no expansion needed)")
+              f"(display ratio {display_label_ratio:.0%} ≥ 30%, no expansion)")
     else:
+        # Few labels — expand conservatively
         intra_target_dists = []
         for i in range(len(labeled_list)):
             for j in range(i + 1, len(labeled_list)):
@@ -323,17 +441,24 @@ def build_calibration(sample_data, my_team_indices):
                     np.linalg.norm(X_scaled[labeled_list[i]] - X_scaled[labeled_list[j]])
                 )
         if intra_target_dists:
-            expand_radius = np.median(intra_target_dists) * 1.0
+            # Use 25th percentile × 0.5 (very conservative)
+            # Old: median × 1.0 → way too aggressive for diverse jerseys
+            expand_radius = np.percentile(intra_target_dists, 25) * 0.5
         else:
-            expand_radius = np.percentile(min_dist_to_target, 25)
+            expand_radius = np.percentile(min_dist_to_target, 15)
 
         expanded_target = set(target_crop_indices)
+        max_expanded = int(n_total * 0.6)  # Never expand beyond 60% of total
+
         for i in range(n_total):
+            if len(expanded_target) >= max_expanded:
+                break
             if i not in target_crop_indices and min_dist_to_target[i] <= expand_radius:
                 expanded_target.add(i)
+
         print(f"  Expanded {len(target_crop_indices)} labeled → "
               f"{len(expanded_target)} target samples "
-              f"(radius={expand_radius:.2f})")
+              f"(radius={expand_radius:.2f}, cap={max_expanded})")
 
     non_target_all = [(i, min_dist_to_target[i]) for i in range(n_total)
                       if i not in expanded_target]

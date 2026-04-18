@@ -50,7 +50,7 @@ from ultralytics import YOLO
 
 from src import config
 from src.overlay import detect_static_overlays, visualize_overlay
-from src.calibration import collect_samples, show_samples, build_calibration
+from src.calibration import collect_samples, show_samples, confirm_selection, build_calibration
 from src.pipeline import pass1_fast_scan, pass2_extract
 from src.selection import select_by_quota, auto_target_frames, print_selection_summary
 
@@ -152,11 +152,21 @@ print("\n👆 Look at the grid above. Note the numbers of YOUR team's jerseys.")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ── CELL 6: Team Calibration — Input Your Team ──
+# ── CELL 6a: Team Calibration — Input Your Team ──
 # ══════════════════════════════════════════════════════════════════════
 
 # ← TYPE YOUR TEAM'S GRID NUMBERS HERE (from the grid above)
 MY_TEAM = [0, 3, 5]  # ← UPDATE THIS
+
+# This shows your selections at large size with color analysis.
+# If it warns about mixed LIGHT/DARK, you probably selected opponent crops by mistake.
+# → Remove the wrong numbers from MY_TEAM and re-run this cell.
+MY_TEAM = confirm_selection(sample_data, MY_TEAM)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ── CELL 6b: Build Calibration (only after confirming above) ──
+# ══════════════════════════════════════════════════════════════════════
 
 calibration = build_calibration(sample_data, MY_TEAM)
 print("\n✅ Calibration complete!")
