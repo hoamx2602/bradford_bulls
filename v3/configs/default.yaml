@@ -1,0 +1,90 @@
+# ============================================================
+# Default config for track annotation pipeline
+# Override via CLI: --config configs/person_tracking.yaml
+# Or via env var: TRACK_ANN__DETECTION__CONF=0.3
+# ============================================================
+
+device: "auto"  # "auto" | "cuda" | "cuda:0" | "mps" | "cpu"
+
+# --- Video processing ---
+video:
+  processing_fps: 5             # Sample video at this FPS for tracking
+                                 # (lower = faster, but may miss short tracks)
+  max_duration_s: null           # null = process whole video
+                                 # set int to limit (useful for testing)
+
+# --- Detection ---
+detection:
+  weights: "weights/yolo11l.pt" # Path to YOLO .pt file
+  target_classes: [0]            # COCO classes to detect: [0] = person
+                                 # For Stage A logo detector: [0] (single "logo" class)
+  conf: 0.25                     # Confidence threshold
+  iou: 0.45                      # NMS IoU threshold
+  imgsz: 1280                    # Inference resolution (higher = better small obj)
+  half: true                     # FP16 inference (faster on modern GPU)
+  max_det: 100                   # Max detections per frame
+
+# --- Tracking ---
+tracking:
+  tracker: "botsort.yaml"        # ultralytics built-in: botsort.yaml | bytetrack.yaml
+  min_track_duration_frames: 5   # Discard tracks shorter than this
+  min_track_area_ratio: 0.0005   # Discard tracks where mean bbox area < this fraction of frame
+  persist: true                  # Keep track IDs persistent across calls
+
+# --- Keyframe selection ---
+keyframe:
+  num_per_track: 3               # Number of keyframes to extract per track
+  strategies:                    # Which strategies to use (in order)
+    - "sharpest"                 # Frame with highest Laplacian variance
+    - "largest"                  # Frame with largest bbox area
+    - "midpoint"                 # Frame at middle of track
+  pad_ratio: 0.15                # Pad bbox by this ratio when cropping (0.15 = 15%)
+  min_crop_size: 96              # Minimum crop side length (pixels)
+
+# --- Video clip extraction ---
+clip:
+  duration_s: 2.0                # Clip duration around track midpoint
+  fps: 30                        # Output clip FPS (will subsample/duplicate as needed)
+  codec: "mp4v"                  # Codec for cv2.VideoWriter
+  use_ffmpeg: false              # Use ffmpeg subprocess (better quality)
+                                 # If true, requires ffmpeg in PATH
+
+# --- Annotation package ---
+package:
+  include_full_frames: true      # Save full keyframes (not just crops)
+  include_crops: true            # Save bbox-cropped keyframes
+  include_clips: true            # Save video clips
+  manifest_format: "json"        # "json" | "yaml"
+
+# --- Logo templates (for reviewer UI) ---
+logo_templates:
+  dir: "data/logo_templates"
+  brand_ids:
+    # 21 brands defined in master plan (from PLAN.md)
+    - aon_red
+    - aon_white
+    - atm_hospitality
+    - cch_black
+    - cch_white
+    - chadlaw
+    - em_workwear
+    - fairway_flooring
+    - klg
+    - mcp_away
+    - mcp_home
+    - mna_cladding
+    - mna_support
+    - paints_lacquers_yellow
+    - top_notch
+    - bartercard
+    - floor_tonic
+    - paints_lacquers_red
+    - romantica_white
+    - romantica_black
+    - acs_group
+
+# --- Logging ---
+logging:
+  level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
+  log_to_file: true
+  log_dir: "logs"

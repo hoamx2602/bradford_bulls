@@ -1,0 +1,50 @@
+# Data and artifacts
+data/videos/*
+data/annotation_packages/*
+data/logo_templates/*
+weights/*.pt
+weights/*.pth
+weights/*.onnx
+!data/**/.gitkeep
+!weights/.gitkeep
+!weights/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Hydra outputs
+outputs/
+multirun/

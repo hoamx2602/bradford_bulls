@@ -1,0 +1,75 @@
+# ============================================================
+# v0 — Person tracking
+# Use BEFORE training the custom Stage A logo detector.
+# Detects players (COCO class 0) and tracks them; annotator labels
+# logos within each player track.
+# ============================================================
+
+device: "auto"
+
+video:
+  processing_fps: 5
+  max_duration_s: null
+
+detection:
+  weights: "weights/yolo11l.pt"   # COCO-pretrained, comes with ultralytics
+  target_classes: [0]              # COCO class 0 = person
+  conf: 0.30
+  iou: 0.45
+  imgsz: 1280
+  half: true
+  max_det: 50
+
+tracking:
+  tracker: "botsort.yaml"
+  min_track_duration_frames: 10    # players appear longer than logos
+  min_track_area_ratio: 0.005      # ~0.5% of frame; player should be reasonably big
+  persist: true
+
+keyframe:
+  num_per_track: 3
+  strategies: ["sharpest", "largest", "midpoint"]
+  pad_ratio: 0.10                  # less padding for player crops (already large)
+  min_crop_size: 192
+
+clip:
+  duration_s: 2.0
+  fps: 30
+  codec: "mp4v"
+  use_ffmpeg: false                # set true if ffmpeg is installed for better quality
+
+package:
+  include_full_frames: true
+  include_crops: true
+  include_clips: true
+  manifest_format: "json"
+
+logo_templates:
+  dir: "data/logo_templates"
+  brand_ids:
+    - aon_red
+    - aon_white
+    - atm_hospitality
+    - cch_black
+    - cch_white
+    - chadlaw
+    - em_workwear
+    - fairway_flooring
+    - klg
+    - mcp_away
+    - mcp_home
+    - mna_cladding
+    - mna_support
+    - paints_lacquers_yellow
+    - top_notch
+    - bartercard
+    - floor_tonic
+    - paints_lacquers_red
+    - romantica_white
+    - romantica_black
+    - acs_group
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_dir: "logs"

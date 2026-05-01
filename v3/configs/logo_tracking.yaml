@@ -1,0 +1,74 @@
+# ============================================================
+# v1 — Logo tracking
+# Use AFTER training the custom Stage A class-agnostic logo detector.
+# Detects logo regions directly and tracks them; annotator only confirms brand.
+# ============================================================
+
+device: "auto"
+
+video:
+  processing_fps: 10               # higher fps because logos appear briefly
+  max_duration_s: null
+
+detection:
+  weights: "weights/stage_a_logo_detector.pt"
+  target_classes: [0]              # single "logo" class in Stage A
+  conf: 0.20                       # lower threshold; we want recall
+  iou: 0.50
+  imgsz: 1920                      # high resolution for small logos
+  half: true
+  max_det: 200
+
+tracking:
+  tracker: "botsort.yaml"
+  min_track_duration_frames: 5
+  min_track_area_ratio: 0.0003     # ~0.03% of frame; logos are small
+  persist: true
+
+keyframe:
+  num_per_track: 3
+  strategies: ["sharpest", "largest", "midpoint"]
+  pad_ratio: 0.20                  # more padding to give context for brand recognition
+  min_crop_size: 128
+
+clip:
+  duration_s: 2.0
+  fps: 30
+  codec: "mp4v"
+  use_ffmpeg: false
+
+package:
+  include_full_frames: true
+  include_crops: true
+  include_clips: true
+  manifest_format: "json"
+
+logo_templates:
+  dir: "data/logo_templates"
+  brand_ids:
+    - aon_red
+    - aon_white
+    - atm_hospitality
+    - cch_black
+    - cch_white
+    - chadlaw
+    - em_workwear
+    - fairway_flooring
+    - klg
+    - mcp_away
+    - mcp_home
+    - mna_cladding
+    - mna_support
+    - paints_lacquers_yellow
+    - top_notch
+    - bartercard
+    - floor_tonic
+    - paints_lacquers_red
+    - romantica_white
+    - romantica_black
+    - acs_group
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_dir: "logs"
