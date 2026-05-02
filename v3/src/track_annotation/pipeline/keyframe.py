@@ -19,7 +19,7 @@ import cv2
 
 from track_annotation.config import KeyframeConfig
 from track_annotation.pipeline.detect_track import Detection, Track
-from track_annotation.utils.geometry import crop_with_padding
+from track_annotation.utils.geometry import crop_with_padding, draw_highlighted_bbox
 from track_annotation.utils.logging import get_logger
 from track_annotation.utils.video_io import VideoReader
 
@@ -109,7 +109,14 @@ def write_keyframes(
                 continue
 
             if write_full_frame:
-                annotated = _draw_bbox(frame, kf.detection.bbox)
+                annotated = draw_highlighted_bbox(
+                    frame,
+                    kf.detection.bbox,
+                    color=(0, 255, 0),
+                    thickness=4,
+                    dim_outside=0.55,
+                    label=f"track {track.track_id} · {kf.strategy}",
+                )
                 p = out_dir / f"keyframe_{kf.strategy}_full.jpg"
                 cv2.imwrite(str(p), annotated)
                 kf.full_frame_path = p
@@ -127,9 +134,5 @@ def write_keyframes(
                     kf.crop_path = p
 
 
-def _draw_bbox(image, bbox, color=(0, 255, 0), thickness=3):
-    """Draw a bbox on a copy of the image."""
-    out = image.copy()
-    x1, y1, x2, y2 = (int(round(v)) for v in bbox)
-    cv2.rectangle(out, (x1, y1), (x2, y2), color, thickness)
-    return out
+# Note: bbox drawing now lives in utils.geometry.draw_highlighted_bbox so it can
+# also be reused by the reviewer UI and exporters if needed.

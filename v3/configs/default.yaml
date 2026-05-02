@@ -3,88 +3,60 @@
 # Override via CLI: --config configs/person_tracking.yaml
 # Or via env var: TRACK_ANN__DETECTION__CONF=0.3
 # ============================================================
+#
+# Brand pool is NOT defined here. It lives in the brand registry
+# at data/logo_templates/brands.yaml — referenced by `logo_templates.registry_file`.
+# Variant selection is governed by the per-match kit_context (passed via
+# CLI --kit-context or sidecar match.meta.yaml).
+# ============================================================
 
-device: "auto"  # "auto" | "cuda" | "cuda:0" | "mps" | "cpu"
+device: "auto"
 
-# --- Video processing ---
 video:
-  processing_fps: 5             # Sample video at this FPS for tracking
-                                 # (lower = faster, but may miss short tracks)
-  max_duration_s: null           # null = process whole video
-                                 # set int to limit (useful for testing)
+  processing_fps: 5
+  max_duration_s: null
 
-# --- Detection ---
 detection:
-  weights: "weights/yolo11l.pt" # Path to YOLO .pt file
-  target_classes: [0]            # COCO classes to detect: [0] = person
-                                 # For Stage A logo detector: [0] (single "logo" class)
-  conf: 0.25                     # Confidence threshold
-  iou: 0.45                      # NMS IoU threshold
-  imgsz: 1280                    # Inference resolution (higher = better small obj)
-  half: true                     # FP16 inference (faster on modern GPU)
-  max_det: 100                   # Max detections per frame
+  weights: "weights/yolo11l.pt"
+  target_classes: [0]
+  conf: 0.25
+  iou: 0.45
+  imgsz: 1280
+  half: true
+  max_det: 100
 
-# --- Tracking ---
 tracking:
-  tracker: "botsort.yaml"        # ultralytics built-in: botsort.yaml | bytetrack.yaml
-  min_track_duration_frames: 5   # Discard tracks shorter than this
-  min_track_area_ratio: 0.0005   # Discard tracks where mean bbox area < this fraction of frame
-  persist: true                  # Keep track IDs persistent across calls
+  tracker: "botsort.yaml"
+  min_track_duration_frames: 5
+  min_track_area_ratio: 0.0005
+  persist: true
 
-# --- Keyframe selection ---
 keyframe:
-  num_per_track: 3               # Number of keyframes to extract per track
-  strategies:                    # Which strategies to use (in order)
-    - "sharpest"                 # Frame with highest Laplacian variance
-    - "largest"                  # Frame with largest bbox area
-    - "midpoint"                 # Frame at middle of track
-  pad_ratio: 0.15                # Pad bbox by this ratio when cropping (0.15 = 15%)
-  min_crop_size: 96              # Minimum crop side length (pixels)
+  num_per_track: 3
+  strategies:
+    - "sharpest"
+    - "largest"
+    - "midpoint"
+  pad_ratio: 0.15
+  min_crop_size: 96
 
-# --- Video clip extraction ---
 clip:
-  duration_s: 2.0                # Clip duration around track midpoint
-  fps: 30                        # Output clip FPS (will subsample/duplicate as needed)
-  codec: "mp4v"                  # Codec for cv2.VideoWriter
-  use_ffmpeg: false              # Use ffmpeg subprocess (better quality)
-                                 # If true, requires ffmpeg in PATH
+  duration_s: 2.0
+  fps: 30
+  codec: "mp4v"
+  use_ffmpeg: false
 
-# --- Annotation package ---
 package:
-  include_full_frames: true      # Save full keyframes (not just crops)
-  include_crops: true            # Save bbox-cropped keyframes
-  include_clips: true            # Save video clips
-  manifest_format: "json"        # "json" | "yaml"
+  include_full_frames: true
+  include_crops: true
+  include_clips: true
+  manifest_format: "json"
 
-# --- Logo templates (for reviewer UI) ---
 logo_templates:
   dir: "data/logo_templates"
-  brand_ids:
-    # 21 brands defined in master plan (from PLAN.md)
-    - aon_red
-    - aon_white
-    - atm_hospitality
-    - cch_black
-    - cch_white
-    - chadlaw
-    - em_workwear
-    - fairway_flooring
-    - klg
-    - mcp_away
-    - mcp_home
-    - mna_cladding
-    - mna_support
-    - paints_lacquers_yellow
-    - top_notch
-    - bartercard
-    - floor_tonic
-    - paints_lacquers_red
-    - romantica_white
-    - romantica_black
-    - acs_group
+  registry_file: "brands.yaml"
 
-# --- Logging ---
 logging:
-  level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
+  level: "INFO"
   log_to_file: true
   log_dir: "logs"

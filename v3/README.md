@@ -4,6 +4,8 @@ Module phụ trợ cho việc annotation logo sponsorship trên video rugby Brad
 
 Triển khai **ý tưởng 2 (track-level annotation)** + **ý tưởng 3 (video clip review)** từ master plan, giải quyết vấn đề frame mờ trên video thể thao 720p/1080p bằng cách chuyển paradigm từ frame-level sang track-level annotation.
 
+Cộng với mô hình **Brand / Variant / Kit-Context** để xử lý chính xác việc cùng một sponsor có nhiều phiên bản logo (light/dark/red/white) tuỳ kit của trận đấu.
+
 ---
 
 ## Vì sao cần module này
@@ -14,10 +16,28 @@ Module này thay đổi paradigm:
 
 1. **Detect + track** đối tượng (player hoặc logo, tuỳ giai đoạn)
 2. Mỗi track sinh ra một "annotation unit" gồm: 3 keyframe best-evidence + video clip 2 giây
-3. Annotator quyết định brand **một lần cho cả track** thay vì mỗi frame
+3. Annotator quyết định **brand** (không phải variant) **một lần cho cả track** — variant tự động suy ra từ kit_context của trận
 4. Label tự động propagate cho mọi frame trong track
 
 → Giảm 5–10x thời gian annotation, đồng thời tăng chất lượng vì mỗi quyết định brand dựa trên evidence tốt nhất trong track.
+
+---
+
+## Mô hình Brand / Variant / Kit-Context
+
+| Khái niệm | Định nghĩa | Ví dụ |
+|---|---|---|
+| **Brand** | Sponsor master entity, dùng cho định giá & reporting | `aon`, `cch`, `mcp` |
+| **Variant** | Một phiên bản hình ảnh cụ thể của brand | `aon_red`, `aon_white` |
+| **Kit context** | Kit cầu thủ mặc trong trận | `home`, `away`, `special` |
+| **Active variant** | Variant nào dùng cho trận này | `aon_red` khi `kit_context=home` |
+
+Mỗi variant trong `data/logo_templates/brands.yaml` khai báo `kit_contexts: [home]` hoặc `[any]`. Tại runtime:
+
+- Annotator chỉ thấy các brand active cho kit_context của trận → giảm dropdown từ 21 → ~16 entry
+- Variant tự động suy ra từ context (không cần annotator nhớ "trận này home → chọn aon_red")
+- YOLO export mặc định dùng **brand-level class** (16 class) thay vì variant-level (21 class) → consolidate samples, model train tốt hơn
+- Stage B brand recognition (sau này) chỉ match với template active cho kit_context → giảm confusion
 
 ---
 
@@ -30,56 +50,64 @@ v3/
 ├── pyproject.toml
 ├── .gitignore
 │
-├── configs/                            # YAML configs (Hydra-style)
-│   ├── default.yaml                    # Default settings
-│   ├── person_tracking.yaml            # v0: track players (before custom logo detector)
-│   └── logo_tracking.yaml              # v1: track logos (after Stage A is trained)
+├── configs/                            # YAML configs (Pydantic-validated)
+│   ├── default.yaml
+│   ├── person_tracking.yaml            # v0: track players
+│   └── logo_tracking.yaml              # v1: track logos
 │
 ├── data/                               # Local data (gitignored)
 │   ├── videos/                         # Input videos
-│   ├── logo_templates/                 # 21 brand templates
+│   │   └── match.meta.example.yaml     # Example match metadata sidecar
+│   ├── logo_templates/
+│   │   ├── brands.yaml                 # **Brand/variant/kit_context registry**
+│   │   ├── aon/{red,white}.png
+│   │   ├── cch/{black,white}.png
+│   │   ├── mcp/{home,away}.png
+│   │   ├── chadlaw.png
+│   │   └── ...
 │   └── annotation_packages/            # Output: one folder per video
 │
-├── weights/                            # Model weights (gitignored)
-│   └── README.md                       # How to obtain weights
+├── weights/
+│   └── README.md
 │
 ├── src/
 │   └── track_annotation/
 │       ├── __init__.py
-│       ├── config.py                   # Pydantic config schema
-│       ├── cli.py                      # Command-line interface
+│       ├── config.py                   # BrandRegistry, MatchContext, etc.
+│       ├── cli.py                      # build-package, export, brands, inspect
 │       │
-│       ├── pipeline/                   # Core processing pipeline
-│       │   ├── detect_track.py         # Detection + BoT-SORT tracking
-│       │   ├── keyframe.py             # Best-evidence keyframe selection
-│       │   ├── clip.py                 # Video clip extraction
-│       │   ├── pose_align.py           # Pose-aligned multi-frame fusion (idea 1)
-│       │   └── package_builder.py      # Assemble annotation package
+│       ├── pipeline/
+│       │   ├── detect_track.py
+│       │   ├── keyframe.py
+│       │   ├── clip.py
+│       │   ├── pose_align.py
+│       │   └── package_builder.py
 │       │
-│       ├── exporters/                  # Format converters
-│       │   ├── cvat.py                 # CVAT XML
-│       │   ├── yolo.py                 # YOLO format (for training)
-│       │   └── roboflow.py             # Roboflow upload
+│       ├── exporters/
+│       │   ├── cvat.py
+│       │   ├── yolo.py                 # class_mode = single | brand | variant
+│       │   └── roboflow.py
 │       │
-│       ├── reviewer/                   # Streamlit annotation UI
-│       │   └── app.py
+│       ├── reviewer/
+│       │   └── app.py                  # Brand-aware Streamlit UI
 │       │
-│       └── utils/                      # Shared utilities
-│           ├── video_io.py             # Video reading/writing
-│           ├── geometry.py             # Bbox math, IoU, sharpness
-│           └── logging.py              # Loguru-based logging
+│       └── utils/
+│           ├── video_io.py
+│           ├── geometry.py
+│           └── logging.py
 │
-├── scripts/                            # Standalone runnable scripts
-│   ├── run_pipeline.py                 # End-to-end pipeline
-│   ├── run_reviewer.sh                 # Launch Streamlit reviewer
-│   └── validate_setup.py               # Verify environment + weights
+├── scripts/
+│   ├── run_pipeline.py
+│   ├── run_reviewer.sh
+│   ├── validate_setup.py
+│   └── normalize_logos.py              # Copy Kit Sponsors → data/logo_templates
 │
-├── notebooks/                          # Demo notebooks
+├── notebooks/
 │   └── 01_demo_pipeline.ipynb
 │
-├── tests/                              # Pytest unit tests
-│   ├── test_keyframe.py
-│   └── test_geometry.py
+├── tests/
+│   ├── test_geometry.py
+│   └── test_keyframe.py
 │
 └── docs/
     ├── ARCHITECTURE.md
@@ -102,18 +130,23 @@ pip install -r requirements.txt
 
 ### 2. Chuẩn bị weights
 
-Đặt file YOLO weights vào `weights/`:
-
 ```bash
 cp ../yolo11l.pt weights/yolo11l.pt
-# Sau khi train Stage A custom detector:
-# cp path/to/stage_a.pt weights/stage_a_logo_detector.pt
 ```
 
 ### 3. Chuẩn bị logo templates
 
-Copy 21 logo template vào `data/logo_templates/` (ưu tiên PNG transparent, 512×512).
-Đã có script chuẩn hoá ở `scripts/normalize_logos.py` (TBD).
+Copy từ `Kit Sponsors/` cũ vào structure mới (1 lệnh):
+
+```bash
+# Dry-run để xem mapping
+python scripts/normalize_logos.py --source "../Kit Sponsors/Kit Sponsors" --dry-run
+
+# Thực thi
+python scripts/normalize_logos.py --source "../Kit Sponsors/Kit Sponsors"
+```
+
+Script tự match filename → variant_id qua heuristic (vd `"3 - CCH - Master Logo Black [A3 Digital].png"` → `cch_black`). Các file không match được sẽ liệt kê để bạn map thủ công.
 
 ### 4. Verify setup
 
@@ -121,49 +154,103 @@ Copy 21 logo template vào `data/logo_templates/` (ưu tiên PNG transparent, 51
 python scripts/validate_setup.py
 ```
 
-Kết quả mong đợi: GPU detected, weights loaded, dependencies OK.
+Kết quả mong đợi: GPU detected, weights loaded, brands.yaml parse OK, 21 variants với template files đầy đủ.
 
 ---
 
 ## Sử dụng
 
-### Workflow đầy đủ — từ video tới annotation package
+### Workflow 1 — Build package với explicit kit context
 
 ```bash
-# 1. Chạy detect + track + keyframe selection + clip extraction
-python -m track_annotation.cli build-package \
+python scripts/run_pipeline.py \
     --video data/videos/match_2026_04_15.mp4 \
     --config configs/person_tracking.yaml \
-    --output data/annotation_packages/match_2026_04_15
+    --output data/annotation_packages/match_2026_04_15 \
+    --kit-context home
+```
 
-# 2. Mở Streamlit reviewer để annotate
+### Workflow 2 — Build package với match metadata sidecar (recommended)
+
+⚠️ **Quan trọng**: nếu chỉ truyền `--kit-context` mà không có sidecar metadata với `target_team` + `ignore_regions`, pipeline sẽ track **mọi người trong frame** (cả đội đối thủ, trọng tài, staff, khán giả) và có thể track cả vùng UI overlay (scoreboard, channel logo). Hậu quả: package có hàng nghìn track sai.
+
+Tạo `data/videos/match_2026_04_15.meta.yaml`:
+
+```yaml
+kit_context: home
+match_date: "2026-04-15"
+opponent: "Wakefield Trinity"
+
+# Filter: chỉ giữ player có màu áo Bradford
+target_team:
+  primary_colors:
+    - {name: red,    h: [0, 10],    s: [120, 255], v: [70, 255]}
+    - {name: amber,  h: [15, 30],   s: [100, 255], v: [120, 255]}
+  min_team_score: 0.10
+
+# Filter: bỏ vùng overlay UI khỏi detection
+ignore_regions:
+  - [0.00, 0.85, 0.50, 1.00]    # bottom-left scoreboard
+  - [0.85, 0.00, 1.00, 0.15]    # top-right BullsTV logo
+```
+
+Xem `data/videos/match.meta.example.yaml` (home, red+amber) và `match.meta.away.example.yaml` (away, white) để có template đầy đủ.
+
+Rồi chạy:
+
+```bash
+python scripts/run_pipeline.py \
+    --video data/videos/match_2026_04_15.mp4 \
+    --config configs/person_tracking.yaml \
+    --output data/annotation_packages/match_2026_04_15 \
+    --match-meta data/videos/match_2026_04_15.meta.yaml
+```
+
+Sidecar approach có ưu điểm: metadata gắn liền với video file, không bị lạc, dễ batch nhiều trận.
+
+### Workflow 3 — Annotate qua Streamlit reviewer
+
+```bash
 bash scripts/run_reviewer.sh data/annotation_packages/match_2026_04_15
+```
 
-# 3. Sau khi annotate xong, export sang format YOLO để train
+Reviewer tự load `kit_context` từ manifest → chỉ show brand active cho kit này.
+
+### Workflow 4 — Export YOLO format
+
+```bash
+# Mặc định: brand-level multi-class (recommended for most training)
 python -m track_annotation.cli export \
     --package data/annotation_packages/match_2026_04_15 \
     --format yolo \
     --output data/yolo_dataset
+
+# Single-class (cho Stage A class-agnostic detector)
+python -m track_annotation.cli export \
+    --package data/annotation_packages/match_2026_04_15 \
+    --format yolo \
+    --output data/yolo_dataset_stage_a \
+    --class-mode single
+
+# Variant-level (cho fine-grained model nâng cao)
+python -m track_annotation.cli export \
+    --package data/annotation_packages/match_2026_04_15 \
+    --format yolo \
+    --output data/yolo_dataset_variant \
+    --class-mode variant
 ```
 
-### Hai chế độ vận hành
-
-**v0 — Person tracking (giai đoạn vòng 1 annotation):**
-
-Dùng YOLO11-L pretrained COCO để detect & track player. Mỗi player track là một annotation unit; annotator label các logo nhìn thấy trên jersey trong track đó.
+### Workflow 5 — Liệt kê brand cho kit context
 
 ```bash
-python -m track_annotation.cli build-package \
-    --video VIDEO --config configs/person_tracking.yaml --output OUT
+python -m track_annotation.cli brands --kit-context home
+python -m track_annotation.cli brands --kit-context away
 ```
 
-**v1 — Logo tracking (sau khi có Stage A custom detector):**
-
-Swap detector sang custom Stage A class-agnostic logo detector. Track logo trực tiếp; annotator chỉ cần confirm brand.
+### Workflow 6 — Inspect package
 
 ```bash
-python -m track_annotation.cli build-package \
-    --video VIDEO --config configs/logo_tracking.yaml --output OUT
+python -m track_annotation.cli inspect --package data/annotation_packages/match_2026_04_15
 ```
 
 ---
@@ -172,17 +259,30 @@ python -m track_annotation.cli build-package \
 
 ```
 data/annotation_packages/match_2026_04_15/
-├── manifest.json                       # Metadata: video info, config used, track count
+├── manifest.json                       # match metadata + kit_context + active brand pool
 ├── tracks/
 │   ├── track_00001/
-│   │   ├── keyframe_sharpest.jpg       # Frame có sharpness cao nhất
-│   │   ├── keyframe_largest.jpg        # Frame có bbox to nhất
-│   │   ├── keyframe_midpoint.jpg       # Frame ở giữa track
-│   │   ├── clip.mp4                    # Video clip 2 giây
-│   │   └── meta.json                   # bbox sequence, timestamps, sharpness scores
-│   ├── track_00002/
+│   │   ├── keyframe_*_full.jpg
+│   │   ├── keyframe_*_crop.jpg
+│   │   ├── clip.mp4
+│   │   └── meta.json
 │   └── ...
-└── annotations.jsonl                   # Output từ reviewer (1 dòng = 1 brand assignment)
+└── annotations.jsonl                   # 1 dòng = 1 track-brand assignment
+```
+
+**Mỗi dòng `annotations.jsonl`:**
+
+```json
+{
+  "track_id": 42,
+  "brand_id": "aon",
+  "variant_id": "aon_red",
+  "position": "chest_front",
+  "visibility_quality": "clear",
+  "is_target_team": true,
+  "skip": false,
+  "kit_context": "home"
+}
 ```
 
 ---
@@ -197,8 +297,7 @@ data/annotation_packages/match_2026_04_15/
 | Python | 3.10+ | 3.10 |
 | CUDA | 11.8+ | 12.1 |
 
-Throughput tham khảo trên RTX 4500 Ada (1 trận 2h, 1080p, 5 fps processing):
-
+Throughput trên RTX 4500 Ada (1 trận 2h, 1080p):
 - detect + track: ~25 phút
 - keyframe + clip extraction: ~10 phút
 - **Total: ~35 phút / trận**

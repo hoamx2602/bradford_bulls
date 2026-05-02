@@ -63,6 +63,8 @@ Module này phục vụ **Tầng 2 + Tầng 4** trong giai đoạn vòng 1 (play
 - Pydantic schema cho mọi knob của pipeline.
 - Load từ YAML, override bằng env var với prefix `TRACK_ANN__`.
 - Validate type và value range tại load time → fail fast.
+- **Brand model**: `Brand` (master) chứa `list[Variant]`. Mỗi `Variant` có `kit_contexts: list[home|away|special|any]` quy định khi nào active. Loaded từ `data/logo_templates/brands.yaml` riêng (không inline trong pipeline config).
+- **MatchContext**: per-match metadata (kit_context, opponent, date, …) — passed via CLI `--kit-context` hoặc sidecar `match.meta.yaml`.
 
 ### `utils/`
 - `logging.py`: loguru-based, console + file rotation.
@@ -77,18 +79,56 @@ Module này phục vụ **Tầng 2 + Tầng 4** trong giai đoạn vòng 1 (play
 - `package_builder.py`: orchestrator — gọi tuần tự detect_track → keyframe → clip → write package.
 
 ### `exporters/`
-- `yolo.py`: package → YOLO format (data.yaml + images/labels split). Hỗ trợ single-class (cho Stage A) và multi-class.
-- `cvat.py`: package → CVAT 1.1 XML. Cho phép annotator refine bboxes trong CVAT trước khi gán brand.
+- `yolo.py`: package → YOLO format (data.yaml + images/labels split).
+  - `class_mode=single`: 1 class "logo" (cho Stage A class-agnostic).
+  - `class_mode=brand` (mặc định): N class = các brand_id unique trong annotations (~16 nếu cover hết).
+  - `class_mode=variant`: N class = các variant_id unique (~21 nếu cover hết).
+- `cvat.py`: package → CVAT 1.1 XML.
 - `roboflow.py`: upload YOLO dataset lên Roboflow project.
 
 ### `reviewer/app.py`
 - Streamlit UI. Một track per page với 3 keyframe + clip + brand grid.
+- **Brand-aware**: load `kit_context` từ manifest, chỉ show brand active cho kit này. Variant tự động suy ra (annotator không phải chọn) trừ khi brand có > 1 active variant cho cùng kit_context.
 - Append annotation vào `annotations.jsonl` (idempotent — re-runnable).
 - State: `st.session_state.track_idx` track vị trí hiện tại; resume từ track chưa annotate đầu tiên.
 
 ### `cli.py`
 - Click-based CLI: `build-package`, `export`, `inspect`.
 - Là entrypoint chính khi chạy production.
+
+## Brand / Variant / Kit-context — chi tiết
+
+### Vì sao tách layer Brand vs Variant
+
+Mỗi sponsor master entity (vd "Aon") có thể có nhiều phiên bản hình ảnh (vd `aon_red` cho home, `aon_white` cho away). Trước refactor v0.2, code treat 21 variant như 21 brand riêng, gây 3 vấn đề:
+
+1. **Reporting**: sponsor quan tâm "Aon được bao nhiêu exposure", không phải `aon_red` riêng — phải aggregate thủ công.
+2. **Annotation**: annotator phải tự nhớ trận này home → chọn `aon_red`, không phải `aon_white`. Dễ sai.
+3. **Training**: model phải học phân biệt `aon_red` vs `aon_white` mặc dù same brand → phí samples + risk confused.
+
+Refactor v0.2 fix triệt để: brand là master entity, variant là appearance, kit_context là hoàn cảnh — 3 thứ độc lập.
+
+### Cách kit_context hoạt động trong runtime
+
+```
+build_package(video, registry, MatchContext(kit_context="home"))
+    └─> manifest.logo_templates.active_brands  # snapshot of brands active for "home"
+    └─> reviewer/app.py reads this snapshot, shows only home brands
+    └─> exporter aggregates by brand_id (or variant_id) per --class-mode
+
+annotation row:
+{"track_id": 42, "brand_id": "aon", "variant_id": "aon_red", "kit_context": "home", ...}
+```
+
+`active_brands` được snapshot tại build time vào manifest → reviewer/exporter không bị ảnh hưởng nếu registry sau đó thay đổi.
+
+### Variant của brand cùng active cho 1 kit_context
+
+Hiếm khi xảy ra (thường mỗi kit chỉ có 1 variant per brand). Nếu có (vd brand có cả `_v1` và `_v2` cho cùng home kit), reviewer sẽ hiển thị secondary dropdown để annotator chọn variant cụ thể.
+
+### Brand không gắn với kit (single variant brands)
+
+Dùng `kit_contexts: [any]` — luôn active cho mọi kit_context. Hầu hết các sponsor (KLG, ChadLaw, EM Workwear, …) thuộc loại này.
 
 ## Design decisions
 

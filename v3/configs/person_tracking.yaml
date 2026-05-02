@@ -4,6 +4,15 @@
 # Detects players (COCO class 0) and tracks them; annotator labels
 # logos within each player track.
 # ============================================================
+#
+# Filtering pipeline applied AFTER raw YOLO detection:
+#   1. ignore_regions   (UI overlays, scoreboard, channel logos) — from MatchContext
+#   2. min_track_duration_frames + min_track_area_ratio          — here
+#   3. team color filter                                          — from MatchContext
+#
+# Make sure your match.meta.yaml provides target_team.primary_colors and
+# ignore_regions, otherwise tracks WILL include opponents, refs, staff, crowd.
+# ============================================================
 
 device: "auto"
 
@@ -12,31 +21,33 @@ video:
   max_duration_s: null
 
 detection:
-  weights: "weights/yolo11l.pt"   # COCO-pretrained, comes with ultralytics
-  target_classes: [0]              # COCO class 0 = person
-  conf: 0.30
+  weights: "weights/yolo11l.pt"
+  target_classes: [0]                  # COCO class 0 = person
+  conf: 0.40                           # was 0.30 — bumped to drop low-conf crowd
   iou: 0.45
   imgsz: 1280
   half: true
-  max_det: 50
+  max_det: 30                          # was 50 — focus on dominant figures only
 
 tracking:
   tracker: "botsort.yaml"
-  min_track_duration_frames: 10    # players appear longer than logos
-  min_track_area_ratio: 0.005      # ~0.5% of frame; player should be reasonably big
+  min_track_duration_frames: 15        # was 10 — drop brief glimpses
+  min_track_area_ratio: 0.025          # was 0.005 (0.5%) — now 2.5%
+                                        # 1080p 1080×1920 → ~52k px = ~228×228 person
+                                        # ↑ rejects tiny background people
   persist: true
 
 keyframe:
   num_per_track: 3
   strategies: ["sharpest", "largest", "midpoint"]
-  pad_ratio: 0.10                  # less padding for player crops (already large)
+  pad_ratio: 0.10
   min_crop_size: 192
 
 clip:
   duration_s: 2.0
   fps: 30
   codec: "mp4v"
-  use_ffmpeg: false                # set true if ffmpeg is installed for better quality
+  use_ffmpeg: false
 
 package:
   include_full_frames: true
@@ -46,28 +57,7 @@ package:
 
 logo_templates:
   dir: "data/logo_templates"
-  brand_ids:
-    - aon_red
-    - aon_white
-    - atm_hospitality
-    - cch_black
-    - cch_white
-    - chadlaw
-    - em_workwear
-    - fairway_flooring
-    - klg
-    - mcp_away
-    - mcp_home
-    - mna_cladding
-    - mna_support
-    - paints_lacquers_yellow
-    - top_notch
-    - bartercard
-    - floor_tonic
-    - paints_lacquers_red
-    - romantica_white
-    - romantica_black
-    - acs_group
+  registry_file: "brands.yaml"
 
 logging:
   level: "INFO"

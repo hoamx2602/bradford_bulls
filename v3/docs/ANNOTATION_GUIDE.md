@@ -39,6 +39,10 @@ Mở browser tại http://localhost:8501.
    - **Có logo nhưng không xác định brand** → chọn `unknown` → Save & next.
    - **Không nhìn thấy logo / không phải Bradford** → Skip (not visible).
 
+   ⚠️ **Lưu ý quan trọng — brand vs variant**: bạn chỉ chọn **brand** (ví dụ "Aon", "CCH"), không chọn variant (ví dụ aon_red vs aon_white). Hệ thống tự suy ra variant đúng từ kit_context của trận (hiển thị ở sidebar trên cùng "Kit context: home/away/...").
+
+   Trong trường hợp hiếm có 1 brand có nhiều variant cùng active cho 1 kit (vd brand đổi logo giữa mùa giải), reviewer sẽ hiện secondary dropdown — chọn variant cụ thể bạn thấy.
+
 ### 3. Position labeling
 
 Chọn vị trí nơi logo xuất hiện trên cơ thể cầu thủ:

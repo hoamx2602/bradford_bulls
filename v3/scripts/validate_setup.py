@@ -131,13 +131,51 @@ def main():
         if not p.exists():
             failures += 1
 
-    # 6. Logo templates dir
+    # 6. Logo templates + brand registry
     templates_dir = ROOT / "data" / "logo_templates"
     if templates_dir.exists():
-        n = len(list(templates_dir.glob("*.png")) + list(templates_dir.glob("*.jpg")))
-        check("logo_templates/", True, f"{n} files")
+        n = len(
+            list(templates_dir.glob("**/*.png"))
+            + list(templates_dir.glob("**/*.jpg"))
+            + list(templates_dir.glob("**/*.jpeg"))
+        )
+        check("logo_templates/", True, f"{n} image files")
     else:
         check("logo_templates/", False, "dir missing")
+        failures += 1
+
+    registry_path = templates_dir / "brands.yaml"
+    if registry_path.exists():
+        try:
+            from track_annotation.config import load_brand_registry
+            reg = load_brand_registry(registry_path)
+            n_variants = sum(len(b.variants) for b in reg.brands)
+            check(
+                "brands.yaml registry",
+                True,
+                f"{len(reg.brands)} brands, {n_variants} variants",
+            )
+
+            # Verify each variant template path exists
+            missing = []
+            for b in reg.brands:
+                for v in b.variants:
+                    if not (templates_dir / v.template_path).exists():
+                        missing.append(f"{v.id} → {v.template_path}")
+            if missing:
+                print(
+                    f"[{YELLOW}WARN{RESET}] {len(missing)} template files missing "
+                    f"(run scripts/normalize_logos.py to populate):"
+                )
+                for m in missing[:10]:
+                    print(f"  - {m}")
+                if len(missing) > 10:
+                    print(f"  ... and {len(missing) - 10} more")
+        except Exception as e:  # noqa: BLE001
+            check("brands.yaml parse", False, str(e))
+            failures += 1
+    else:
+        check("brands.yaml", False, "missing — see data/logo_templates/brands.yaml")
         failures += 1
 
     # 7. Write access

@@ -1,24 +1,25 @@
 """
 Annotation package builder.
 
-End-to-end orchestrator: takes a video + config, runs detect_track + keyframe +
-clip extraction, and writes a self-contained annotation package directory.
+End-to-end orchestrator: takes a video + config + brand registry + match context,
+runs detect_track + keyframe + clip extraction, and writes a self-contained
+annotation package directory.
 
 Output structure
 ----------------
     output/
-    ├── manifest.json
+    ├── manifest.json            # match metadata, kit_context, active brands/variants
     ├── tracks/
     │   ├── track_00001/
-    │   │   ├── keyframe_sharpest_full.jpg
-    │   │   ├── keyframe_sharpest_crop.jpg
-    │   │   ├── keyframe_largest_full.jpg
-    │   │   ├── ...
+    │   │   ├── keyframe_*_full.jpg
+    │   │   ├── keyframe_*_crop.jpg
     │   │   ├── clip.mp4
     │   │   └── meta.json
-    │   ├── track_00002/
     │   └── ...
-    └── annotations.jsonl       # initially empty; reviewer writes labels here
+    └── annotations.jsonl        # initially empty; reviewer writes labels here
+
+The manifest pins the active brand pool for this match (per kit_context) so the
+reviewer UI and exporters consume a consistent view.
 """
 
 from __future__ import annotations
@@ -31,7 +32,11 @@ from typing import Any
 
 from tqdm import tqdm
 
-from track_annotation.config import TrackAnnotationConfig
+from track_annotation.config import (
+    BrandRegistry,
+    MatchContext,
+    TrackAnnotationConfig,
+)
 from track_annotation.pipeline.detect_track import Track, run_detect_track
 from track_annotation.pipeline.keyframe import select_keyframes, write_keyframes
 from track_annotation.pipeline.clip import extract_clip
@@ -45,6 +50,8 @@ def build_package(
     video_path: str | Path,
     output_dir: str | Path,
     config: TrackAnnotationConfig,
+    registry: BrandRegistry,
+    match_context: MatchContext,
 ) -> Path:
     """
     Build a complete annotation package for a video.
@@ -57,6 +64,10 @@ def build_package(
         Where to write the package directory.
     config : TrackAnnotationConfig
         Pipeline config.
+    registry : BrandRegistry
+        Brand/variant registry (loaded from data/logo_templates/brands.yaml).
+    match_context : MatchContext
+        Per-match metadata; .kit_context determines which variants are active.
 
     Returns
     -------
@@ -70,25 +81,37 @@ def build_package(
     tracks_root.mkdir(exist_ok=True)
 
     log.info(f"Building annotation package")
-    log.info(f"  video : {video_path}")
-    log.info(f"  output: {output_dir}")
+    log.info(f"  video       : {video_path}")
+    log.info(f"  output      : {output_dir}")
+    log.info(f"  kit_context : {match_context.kit_context}")
+    active_brands = registry.list_active_brands(match_context.kit_context)
+    active_variants = registry.list_active_variants(match_context.kit_context)
+    log.info(
+        f"  active pool : {len(active_brands)} brands, {len(active_variants)} variants"
+    )
 
-    # 1. Detection + tracking
-    tracks = run_detect_track(video_path, config)
+    # 1. Detection + tracking + filtering (uses ignore_regions and team_filter from match_context)
+    tracks = run_detect_track(video_path, config, match_context=match_context)
 
-    # 2. Per-track: keyframes + clip + meta
+    # 2. Per-track artifacts
     log.info(f"Writing {len(tracks)} track packages...")
     for track in tqdm(tracks, desc="track packages", unit="track"):
         _write_one_track_package(video_path, track, tracks_root, config)
 
     # 3. Manifest
-    manifest = _build_manifest(video_path, output_dir, tracks, config)
+    manifest = _build_manifest(
+        video_path=video_path,
+        output_dir=output_dir,
+        tracks=tracks,
+        config=config,
+        registry=registry,
+        match_context=match_context,
+    )
     manifest_path = output_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, default=str)
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
     log.info(f"  wrote manifest: {manifest_path}")
 
-    # 4. Empty annotations.jsonl (reviewer appends to this)
+    # 4. Empty annotations.jsonl
     ann_path = output_dir / "annotations.jsonl"
     if not ann_path.exists():
         ann_path.touch()
@@ -107,7 +130,6 @@ def _write_one_track_package(
     track_dir = tracks_root / f"track_{track.track_id:05d}"
     track_dir.mkdir(parents=True, exist_ok=True)
 
-    # Keyframes
     keyframes = select_keyframes(track, config.keyframe)
     if config.package.include_full_frames or config.package.include_crops:
         write_keyframes(
@@ -120,12 +142,10 @@ def _write_one_track_package(
             write_crop=config.package.include_crops,
         )
 
-    # Clip
     if config.package.include_clips:
         clip_path = track_dir / "clip.mp4"
         extract_clip(video_path, track, clip_path, config.clip)
 
-    # Meta
     meta = {
         "track_id": track.track_id,
         "num_frames": track.num_frames,
@@ -136,6 +156,7 @@ def _write_one_track_package(
         "duration_s": track.duration_s,
         "mean_area_ratio": track.mean_area_ratio,
         "mean_confidence": track.mean_confidence,
+        "mean_team_score": track.mean_team_score,
         "keyframes": [
             {
                 "strategy": kf.strategy,
@@ -151,8 +172,7 @@ def _write_one_track_package(
         ],
         "detections": [asdict(d) for d in track.detections],
     }
-    with open(track_dir / "meta.json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+    (track_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
 
 def _build_manifest(
@@ -160,10 +180,13 @@ def _build_manifest(
     output_dir: Path,
     tracks: list[Track],
     config: TrackAnnotationConfig,
+    registry: BrandRegistry,
+    match_context: MatchContext,
 ) -> dict[str, Any]:
     meta = get_video_metadata(video_path)
+    active_brands = registry.list_active_brands(match_context.kit_context)
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "video": {
             "path": str(video_path),
@@ -174,6 +197,7 @@ def _build_manifest(
             "width": meta.width,
             "height": meta.height,
         },
+        "match_context": match_context.model_dump(),
         "config": {
             "device_used": config.resolve_device(),
             "detection_weights": str(config.detection.weights),
@@ -190,7 +214,25 @@ def _build_manifest(
         "annotations_file": "annotations.jsonl",
         "logo_templates": {
             "dir": str(config.logo_templates.dir),
-            "brand_ids": config.logo_templates.brand_ids,
+            "registry_file": config.logo_templates.registry_file,
+            # Snapshot of active brands & variants for this match — pinned at
+            # build time so the reviewer / exporters never disagree with the
+            # runtime registry even if it changes later.
+            "active_brands": [
+                {
+                    "id": b.id,
+                    "display_name": b.display_name,
+                    "variants": [
+                        {
+                            "id": v.id,
+                            "kit_contexts": v.kit_contexts,
+                            "template_path": str(v.template_path),
+                        }
+                        for v in b.active_variants(match_context.kit_context)
+                    ],
+                }
+                for b in active_brands
+            ],
         },
         "stats": {
             "num_tracks": len(tracks),

@@ -6,6 +6,7 @@ from track_annotation.utils.geometry import (
     bbox_area_ratio,
     compute_sharpness,
     crop_with_padding,
+    draw_highlighted_bbox,
     iou,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "bbox_area_ratio",
     "compute_sharpness",
     "crop_with_padding",
+    "draw_highlighted_bbox",
     "iou",
 ]
