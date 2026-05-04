@@ -126,6 +126,7 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
+pip install -e . --no-deps    # cài track_annotation package, cho phép `python -m track_annotation.cli`
 ```
 
 ### 2. Chuẩn bị weights
