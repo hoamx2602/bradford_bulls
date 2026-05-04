@@ -4,6 +4,9 @@
 # ============================================================
 
 # --- Core ML / CV ---
+# Caps are tested against host setup. For Colab, the notebook
+# (notebooks/colab_pipeline.ipynb) filters these out at install time and
+# uses Colab's pre-installed versions instead — no need to relax caps here.
 torch>=2.2.0,<2.5.0
 torchvision>=0.17.0
 ultralytics>=8.3.0           # YOLO11 + BoT-SORT built-in
@@ -11,9 +14,9 @@ opencv-python>=4.9.0
 numpy>=1.26.0,<2.0.0
 Pillow>=10.0.0
 
-# --- Pose estimation (for ý tưởng 1: pose-aligned fusion) ---
-# RTMPose via mmpose - install separately, see weights/README.md
-# Optional fallback: mediapipe (lighter, less accurate)
+# --- Pose estimation (for pipeline.pose_align — ý tưởng 1) ---
+# Lazy-imported inside pose_align.py; safe to install. On Colab the notebook
+# skips this because mediapipe pulls protobuf<5 which can conflict.
 mediapipe>=0.10.0
 
 # --- Tracking & sampling ---

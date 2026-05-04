@@ -1,0 +1,156 @@
+# ============================================================
+# Brand registry — Bradford Bulls sponsorship logos
+# ============================================================
+#
+# Structure:
+#   brands[].id          — master brand identifier (used for reporting & metrics)
+#   brands[].display_name — human-readable name (shown in reviewer UI)
+#   brands[].variants[]  — appearance variants (light/dark/red/white/...)
+#     .id                — unique variant identifier (used in YOLO multi-class export)
+#     .kit_contexts      — list of kit contexts this variant appears in
+#                          one or more of: home | away | special | any
+#                          ("any" = always active regardless of kit)
+#     .template_path     — path relative to data/logo_templates/
+#
+# Workflow:
+#   - Each match has a kit_context (set via --kit-context CLI flag or match meta YAML)
+#   - At annotation time, only variants whose kit_contexts include the match's
+#     kit_context are shown to the annotator and considered for matching
+#   - Brand-level reporting aggregates across all variants of the same brand
+#
+# Adding a new sponsor:
+#   1. Add a new entry under `brands:`
+#   2. Add 1+ variants (use kit_contexts: [any] if no kit-dependent variant exists)
+#   3. Place template image(s) in the correct subfolder
+#   4. Run: python scripts/normalize_logos.py to verify all paths exist
+# ============================================================
+
+brands:
+  - id: aon
+    display_name: "Aon"
+    variants:
+      - id: aon_red
+        kit_contexts: [home]
+        template_path: aon/red.png
+      - id: aon_white
+        kit_contexts: [away]
+        template_path: aon/white.png
+
+  - id: cch
+    display_name: "CCH"
+    variants:
+      - id: cch_black
+        kit_contexts: [home]
+        template_path: cch/black.png
+      - id: cch_white
+        kit_contexts: [away]
+        template_path: cch/white.png
+
+  - id: mcp
+    display_name: "MCP"
+    variants:
+      - id: mcp_home
+        kit_contexts: [home]
+        template_path: mcp/home.png
+      - id: mcp_away
+        kit_contexts: [away]
+        template_path: mcp/away.png
+
+  - id: paints_lacquers
+    display_name: "Paints & Lacquers"
+    variants:
+      - id: paints_lacquers_red
+        kit_contexts: [home]
+        template_path: paints_lacquers/red.png
+      - id: paints_lacquers_yellow
+        kit_contexts: [away]
+        template_path: paints_lacquers/yellow.png
+
+  - id: romantica
+    display_name: "Romantica Beds"
+    variants:
+      - id: romantica_white
+        kit_contexts: [home]
+        template_path: romantica/white.png
+      - id: romantica_black
+        kit_contexts: [away]
+        template_path: romantica/black.png
+
+  # ---- Single-variant brands (kit_contexts: [any]) ----
+
+  - id: atm_hospitality
+    display_name: "ATM Hospitality"
+    variants:
+      - id: atm_hospitality
+        kit_contexts: [any]
+        template_path: atm_hospitality.png
+
+  - id: chadlaw
+    display_name: "ChadLaw"
+    variants:
+      - id: chadlaw
+        kit_contexts: [any]
+        template_path: chadlaw.png
+
+  - id: em_workwear
+    display_name: "EM Workwear"
+    variants:
+      - id: em_workwear
+        kit_contexts: [any]
+        template_path: em_workwear.png
+
+  - id: fairway_flooring
+    display_name: "Fairway Flooring"
+    variants:
+      - id: fairway_flooring
+        kit_contexts: [any]
+        template_path: fairway_flooring.png
+
+  - id: klg
+    display_name: "KLG"
+    variants:
+      - id: klg
+        kit_contexts: [any]
+        template_path: klg.png
+
+  - id: mna_cladding
+    display_name: "MNA Cladding"
+    variants:
+      - id: mna_cladding
+        kit_contexts: [any]
+        template_path: mna_cladding.png
+
+  - id: mna_support
+    display_name: "MNA Support Services"
+    variants:
+      - id: mna_support
+        kit_contexts: [any]
+        template_path: mna_support.png
+
+  - id: top_notch
+    display_name: "Top Notch"
+    variants:
+      - id: top_notch
+        kit_contexts: [any]
+        template_path: top_notch.png
+
+  - id: bartercard
+    display_name: "Bartercard"
+    variants:
+      - id: bartercard
+        kit_contexts: [any]
+        template_path: bartercard.png
+
+  - id: floor_tonic
+    display_name: "Floor Tonic"
+    variants:
+      - id: floor_tonic
+        kit_contexts: [any]
+        template_path: floor_tonic.png
+
+  - id: acs_group
+    display_name: "ACS Group"
+    variants:
+      - id: acs_group
+        kit_contexts: [any]
+        template_path: acs_group.png

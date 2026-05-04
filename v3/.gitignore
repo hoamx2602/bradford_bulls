@@ -9,6 +9,13 @@ weights/*.onnx
 !weights/.gitkeep
 !weights/README.md
 
+# IMPORTANT: keep config / registry files in git even though their parent dirs
+# are ignored. brands.yaml is the master brand registry — without it the pipeline
+# crashes. Example meta YAMLs are documentation.
+!data/logo_templates/brands.yaml
+!data/videos/match.meta.example.yaml
+!data/videos/match.meta.away.example.yaml
+
 # Python
 __pycache__/
 *.py[cod]
