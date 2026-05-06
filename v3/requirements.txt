@@ -20,6 +20,7 @@ Pillow>=10.0.0
 mediapipe>=0.10.0
 
 # --- Tracking & sampling ---
+scikit-learn>=1.4.0           # KMeans clustering (auto_calibrate_kit.py)
 scikit-image>=0.22.0          # SSIM, image quality metrics
 scipy>=1.12.0
 imagehash>=4.3.1              # perceptual hashing dedup
