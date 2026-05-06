@@ -61,13 +61,42 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+# ---------------------------------------------------------------------------
+# Default regions to IGNORE when sampling torsos.
+# Format: [x1_norm, y1_norm, x2_norm, y2_norm]  (0–1 relative to frame size)
+# These cover the most common broadcast overlay zones.
+# Override at runtime with --ignore-regions.
+# ---------------------------------------------------------------------------
+DEFAULT_IGNORE_REGIONS = [
+    [0.00, 0.85, 0.65, 1.00],   # bottom-left scoreboard strip
+    [0.00, 0.00, 0.18, 0.12],   # top-left stream logo
+    [0.82, 0.00, 1.00, 0.12],   # top-right channel/BullsTV logo
+    [0.35, 0.00, 0.65, 0.10],   # top-centre match badge / clock
+]
+
+def _bbox_center_in_ignore(bbox, frame_shape, ignore_regions):
+    """Return True if the centre of *bbox* falls inside any ignore region."""
+    fh, fw = frame_shape[:2]
+    x1, y1, x2, y2 = bbox
+    cx = (x1 + x2) / 2.0 / fw
+    cy = (y1 + y2) / 2.0 / fh
+    for rx1, ry1, rx2, ry2 in ignore_regions:
+        if rx1 <= cx <= rx2 and ry1 <= cy <= ry2:
+            return True
+    return False
+
+
 # Lazy import - only needed if running calibration
-def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: str):
+def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: str,
+                         ignore_regions=None):
     from ultralytics import YOLO
     weights_path = ROOT / "weights" / "yolo11l.pt"
     if not weights_path.exists():
         sys.exit(f"weights not found: {weights_path}")
     model = YOLO(str(weights_path))
+
+    if ignore_regions is None:
+        ignore_regions = DEFAULT_IGNORE_REGIONS
 
     cap = cv2.VideoCapture(str(video_path))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -76,6 +105,7 @@ def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: s
     idxs = np.linspace(int(total * 0.05), int(total * 0.95), n_frames, dtype=int)
 
     crops = []
+    skipped_overlay = 0
     for idx in idxs:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ok, frame = cap.read()
@@ -86,10 +116,16 @@ def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: s
             continue
         for box in results[0].boxes:
             bbox = box.xyxy[0].cpu().numpy()
+            # ── Skip bboxes whose centre is inside a scoreboard / overlay zone ──
+            if _bbox_center_in_ignore(bbox, frame.shape, ignore_regions):
+                skipped_overlay += 1
+                continue
             crop = _extract_torso(frame, bbox)
             if crop is not None:
                 crops.append(crop)
     cap.release()
+    if skipped_overlay:
+        print(f"  Skipped {skipped_overlay} detections inside overlay/scoreboard regions")
     return crops
 
 
@@ -124,23 +160,72 @@ def _extract_torso(frame, bbox):
     return torso
 
 
+def _torso_to_feat(crop):
+    """
+    20-dim feature vector per torso crop:
+      • 18-bin H histogram (only colorful pixels S>40), normalised → sum=1
+        then ×2.0 so hue distribution dominates over brightness
+      • median S /255   (overall, not just colorful pixels)
+      • median V /255
+
+    Using a histogram instead of a single median-H captures the *shape* of the
+    colour distribution, which is essential when jerseys share a similar median
+    hue but differ in how uniformly coloured they are (e.g. one team solid black
+    vs mixed black+white stripes both have low S but very different histograms).
+    """
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    colorful = hsv[..., 1] > 40          # pixels with meaningful saturation
+    n_colorful = colorful.sum()
+
+    if n_colorful > 80:
+        H_vals = hsv[..., 0][colorful].astype(float)
+        hist, _ = np.histogram(H_vals, bins=18, range=(0, 180))
+        hist = hist.astype(float) / max(hist.sum(), 1)   # normalise
+    else:
+        # Nearly achromatic crop (dark/white jersey, or bad crop)
+        # Give it a flat histogram so it clusters together as "achromatic"
+        hist = np.ones(18, dtype=float) / 18.0
+
+    med_s = float(np.median(hsv[..., 1])) / 255.0
+    med_v = float(np.median(hsv[..., 2])) / 255.0
+
+    return np.concatenate([hist * 2.0, [med_s, med_v]])
+
+
 def _cluster_torsos(crops, k):
-    """K-Means cluster on (mean H, mean S, mean V) per torso."""
+    """
+    K-Means on 20-dim HSV histogram features.
+    Returns:
+      labels   – cluster index per crop
+      centers  – (k, 3) array of representative (H, S, V) in OpenCV scale,
+                 computed as per-cluster medians (for display / swatch)
+      feats    – raw feature matrix (n, 20)
+    """
     from sklearn.cluster import KMeans
 
-    feats = []
-    for crop in crops:
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        # Use median (robust to outliers) per channel
-        feats.append([
-            float(np.median(hsv[..., 0])),
-            float(np.median(hsv[..., 1])),
-            float(np.median(hsv[..., 2])),
-        ])
-    feats = np.array(feats)
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    feats = np.array([_torso_to_feat(c) for c in crops])
+    km = KMeans(n_clusters=k, random_state=42, n_init=20)
     labels = km.fit_predict(feats)
-    return labels, km.cluster_centers_, feats
+
+    # Compute per-cluster median HSV (in OpenCV scale) for display
+    centers_hsv = []
+    for ci in range(k):
+        members = [crops[i] for i in range(len(crops)) if labels[i] == ci]
+        if members:
+            all_medians = []
+            for c in members:
+                h = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+                all_medians.append([
+                    float(np.median(h[..., 0])),
+                    float(np.median(h[..., 1])),
+                    float(np.median(h[..., 2])),
+                ])
+            arr = np.array(all_medians)
+            centers_hsv.append(np.median(arr, axis=0).tolist())
+        else:
+            centers_hsv.append([0.0, 0.0, 0.0])
+
+    return labels, np.array(centers_hsv), feats
 
 
 def _compute_hsv_range(cluster_crops, h_pad=12):
@@ -225,12 +310,28 @@ def _save_cluster_grid(crops, labels, centers, out_dir):
     return summaries
 
 
+def _cluster_hue_spread(crops, labels, cluster_id):
+    """Return std-dev of median-H across crops in a cluster (0-180 scale)."""
+    members = [crops[i] for i in range(len(crops)) if labels[i] == cluster_id]
+    if len(members) < 2:
+        return 0.0
+    meds = []
+    for c in members:
+        hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+        meds.append(float(np.median(hsv[..., 0])))
+    return float(np.std(meds))
+
+
 def cmd_calibrate(args):
     if not args.video.exists():
         sys.exit(f"Video not found: {args.video}")
 
+    ignore_regions = getattr(args, "ignore_regions", None) or DEFAULT_IGNORE_REGIONS
+
     print(f"Sampling {args.n_frames} frames from {args.video.name}...")
-    crops = _yolo_detect_persons(args.video, args.n_frames, args.conf, args.device)
+    print(f"  Ignoring {len(ignore_regions)} overlay region(s): {ignore_regions}")
+    crops = _yolo_detect_persons(args.video, args.n_frames, args.conf, args.device,
+                                  ignore_regions=ignore_regions)
     print(f"  Got {len(crops)} valid torso crops")
     if len(crops) < args.k * 3:
         sys.exit(f"Too few crops ({len(crops)}) for K={args.k} clustering. "
@@ -238,7 +339,19 @@ def cmd_calibrate(args):
 
     print(f"Clustering torsos into K={args.k} clusters...")
     labels, centers, feats = _cluster_torsos(crops, args.k)
-    print(f"  Cluster sizes: {[(labels == k).sum() for k in range(args.k)]}")
+
+    sizes = [(labels == k).sum() for k in range(args.k)]
+    print(f"  Cluster sizes: {sizes}")
+
+    # ── Warn about potentially mixed clusters ──────────────────────────────
+    print()
+    for ci in range(args.k):
+        spread = _cluster_hue_spread(crops, labels, ci)
+        if spread > 28:
+            print(f"  ⚠  Cluster {ci}: high hue spread (σ={spread:.1f}°) — "
+                  f"likely mixed or noisy. Consider it a 'reject' cluster.")
+        else:
+            print(f"  ✓  Cluster {ci}: hue spread σ={spread:.1f}°  (looks uniform)")
 
     args.output.mkdir(parents=True, exist_ok=True)
     summaries = _save_cluster_grid(crops, labels, centers, args.output)
@@ -319,6 +432,14 @@ def main():
     p.add_argument("--k", type=int, default=3, help="Number of color clusters (default 3)")
     p.add_argument("--conf", type=float, default=0.5, help="YOLO person confidence (default 0.5)")
     p.add_argument("--device", default="auto", help="auto | cuda | cpu")
+    p.add_argument(
+        "--ignore-regions", type=str, default=None,
+        help=(
+            "JSON list of [x1,y1,x2,y2] normalised regions to exclude from torso sampling. "
+            "Overrides the built-in defaults (scoreboard + stream logo zones). "
+            "Example: --ignore-regions '[[0,0.85,0.6,1],[0.8,0,1,0.12]]'"
+        ),
+    )
 
     p.add_argument("--cluster-id", type=int, default=None,
                    help="Pick this cluster as target team and write meta.yaml")
@@ -332,6 +453,15 @@ def main():
     p.add_argument("--min-team-score", type=float, default=0.10)
 
     args = p.parse_args()
+
+    # Parse --ignore-regions JSON
+    if args.ignore_regions is not None:
+        try:
+            args.ignore_regions = json.loads(args.ignore_regions)
+        except json.JSONDecodeError as e:
+            sys.exit(f"--ignore-regions: invalid JSON — {e}")
+    else:
+        args.ignore_regions = DEFAULT_IGNORE_REGIONS
 
     # Resolve device
     if args.device == "auto":
