@@ -210,6 +210,10 @@ class KeyframeConfig(BaseModel):
     )
     pad_ratio: float = Field(0.15, ge=0.0, le=1.0)
     min_crop_size: int = Field(96, ge=16)
+    # context_pad_ratio controls the "full" keyframe: how much padding around
+    # the player bbox. 1.5 = player + 150% each side. Keeps the view tight on
+    # the target player without showing the whole 1920×1080 scene.
+    context_pad_ratio: float = Field(1.5, ge=0.2, le=10.0)
 
 
 class ClipConfig(BaseModel):
@@ -217,6 +221,9 @@ class ClipConfig(BaseModel):
     fps: int = Field(30, ge=1, le=120)
     codec: str = Field("mp4v")
     use_ffmpeg: bool = False
+    # context_pad_ratio controls the player-following crop window in the clip.
+    # Same semantics as KeyframeConfig.context_pad_ratio.
+    context_pad_ratio: float = Field(1.5, ge=0.2, le=10.0)
 
 
 class PackageConfig(BaseModel):

@@ -109,11 +109,24 @@ def write_keyframes(
                 continue
 
             if write_full_frame:
-                annotated = draw_highlighted_bbox(
+                # Use a context crop (player + surroundings) instead of the
+                # full 1920×1080 frame. This keeps focus on the tracked player
+                # and prevents opponent players from dominating the view.
+                context_pad = getattr(config, "context_pad_ratio", 1.5)
+                ctx_crop, (cx1, cy1, _cx2, _cy2) = crop_with_padding(
                     frame,
                     kf.detection.bbox,
+                    pad_ratio=context_pad,
+                    min_size=config.min_crop_size,
+                )
+                # Translate bbox into crop-local coordinates for the highlight
+                bx1, by1, bx2, by2 = kf.detection.bbox
+                local_bbox = (bx1 - cx1, by1 - cy1, bx2 - cx1, by2 - cy1)
+                annotated = draw_highlighted_bbox(
+                    ctx_crop,
+                    local_bbox,
                     color=(0, 255, 0),
-                    thickness=4,
+                    thickness=3,
                     dim_outside=0.55,
                     label=f"track {track.track_id} · {kf.strategy}",
                 )

@@ -61,6 +61,40 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+def _has_grass_nearby(frame, bbox, threshold=0.12):
+    """
+    Return True if the area around/below the bbox contains enough grass pixels.
+    Players on the pitch will have grass near their feet; fans in the stands won't.
+    Checks three zones: below feet, left side, right side of the bbox.
+    """
+    fh, fw = frame.shape[:2]
+    x1, y1, x2, y2 = (int(v) for v in bbox)
+    bw, bh = x2 - x1, y2 - y1
+
+    def grass_frac(region):
+        if region.size == 0:
+            return 0.0
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (35, 40, 40), (85, 255, 255))
+        return mask.mean() / 255.0
+
+    # Zone 1: strip directly below the feet (most reliable)
+    foot_y1 = min(fh, y2)
+    foot_y2 = min(fh, y2 + max(20, int(bh * 0.25)))
+    foot_x1 = max(0, x1 + int(bw * 0.1))
+    foot_x2 = min(fw, x2 - int(bw * 0.1))
+    below = frame[foot_y1:foot_y2, foot_x1:foot_x2]
+
+    # Zone 2 & 3: left and right flanks beside the torso
+    side_y1 = max(0, y1 + int(bh * 0.4))
+    side_y2 = min(fh, y2)
+    pad = max(10, int(bw * 0.4))
+    left  = frame[side_y1:side_y2, max(0, x1 - pad):max(0, x1)]
+    right = frame[side_y1:side_y2, min(fw, x2):min(fw, x2 + pad)]
+
+    return max(grass_frac(below), grass_frac(left), grass_frac(right)) >= threshold
+
+
 # Lazy import - only needed if running calibration
 def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: str):
     from ultralytics import YOLO
@@ -76,6 +110,7 @@ def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: s
     idxs = np.linspace(int(total * 0.05), int(total * 0.95), n_frames, dtype=int)
 
     crops = []
+    skipped_crowd = 0
     for idx in idxs:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ok, frame = cap.read()
@@ -86,10 +121,16 @@ def _yolo_detect_persons(video_path: Path, n_frames: int, conf: float, device: s
             continue
         for box in results[0].boxes:
             bbox = box.xyxy[0].cpu().numpy()
+            # Skip spectators / crowd: no grass around them
+            if not _has_grass_nearby(frame, bbox):
+                skipped_crowd += 1
+                continue
             crop = _extract_torso(frame, bbox)
             if crop is not None:
                 crops.append(crop)
     cap.release()
+    if skipped_crowd:
+        print(f"  Skipped {skipped_crowd} non-pitch detections (fans/crowd, no grass nearby)")
     return crops
 
 
