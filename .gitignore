@@ -28,3 +28,6 @@ metadata/
 videos/
 src/frame_extraction/__pycache__
 weights/
+sr_output/
+test-frames/
+v3/deblur_output/
